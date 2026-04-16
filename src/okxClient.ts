@@ -40,7 +40,10 @@ function cacheSet<T>(key: string, value: T): void {
 // ---------------------------------------------------------------------------
 async function runCli<T>(args: string[]): Promise<T | null> {
   try {
-    const { stdout } = await execFileAsync("onchainos", args, { timeout: CLI_TIMEOUT_MS });
+    const { stdout } = await execFileAsync("onchainos", args, {
+      timeout: CLI_TIMEOUT_MS,
+      env: onchainosEnv(),
+    });
     const json = JSON.parse(stdout) as { ok: boolean; data?: T };
     if (!json.ok) {
       logger.warn({ args: args.join(" ") }, "[okx] response not-ok");
@@ -51,6 +54,16 @@ async function runCli<T>(args: string[]): Promise<T | null> {
     logger.warn({ err: (err as Error).message, args: args.join(" ") }, "[okx] cli failed");
     return null;
   }
+}
+
+function onchainosEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  // The onchainos CLI expects OKX_PASSPHRASE. Keep the older
+  // OKX_API_PASSPHRASE name working for existing local .env files.
+  if (!env.OKX_PASSPHRASE && env.OKX_API_PASSPHRASE) {
+    env.OKX_PASSPHRASE = env.OKX_API_PASSPHRASE;
+  }
+  return env;
 }
 
 // ---------------------------------------------------------------------------

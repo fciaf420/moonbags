@@ -137,7 +137,7 @@ If you want to see the signal quality firsthand, follow [@scg_alpha](https://x.c
 
 ## Quick start — the setup wizard (recommended)
 
-There's an interactive CLI wizard that walks you through every credential, validates each one as you go, **auto-detects your Telegram chat_id**, and can generate a fresh Solana keypair for you. It's the fastest path from `git clone` to a running bot.
+There's an interactive CLI wizard that walks you through every credential, validates the services it can check live, **auto-detects your Telegram chat_id**, and can generate a fresh Solana keypair for you. It's the fastest path from `git clone` to a running bot.
 
 ```bash
 # 1. Clone and install
@@ -157,13 +157,14 @@ The wizard walks through:
 | Step | What it does |
 |------|--------------|
 | 1 | Checks that the `onchainos` CLI is on `$PATH` |
-| 2 | Jupiter API key — with link + live validation |
-| 3 | Helius RPC key — with link + live validation |
-| 4 | Solana wallet — offers to **generate a fresh keypair** (saves to `moonbags-keypair.json`) or accept a pasted base58 secret |
-| 5 | Telegram bot token — verifies via `getMe`, then **auto-detects your chat_id** after you message the bot once |
-| 6 | MiniMax API key (optional) + LLM advisor on/off toggle |
-| 7 | Trading params — backtest-optimized defaults (BUY 0.02 SOL, arm +50%, trail 55%, stop -40%), editable |
-| 8 | Writes `.env` (backs up existing one first) |
+| 2 | OKX OnchainOS credentials — links to the dev portal and stores API key, secret key, and passphrase |
+| 3 | Jupiter API key — with link + live validation |
+| 4 | Helius RPC key — with link + live validation |
+| 5 | Solana wallet — offers to **generate a fresh keypair** (saves to `moonbags-keypair.json`) or accept a pasted base58 secret |
+| 6 | Telegram bot token — verifies via `getMe`, then **auto-detects your chat_id** after you message the bot once |
+| 7 | MiniMax API key (optional) + LLM advisor on/off toggle |
+| 8 | Trading params — backtest-optimized defaults (BUY 0.02 SOL, arm +50%, trail 55%, stop -40%), editable |
+| 9 | Writes `.env` (backs up existing one first) |
 
 The wizard never writes anything until the final confirmation step, and any existing `.env` is backed up to `.env.backup.<timestamp>` before it's touched.
 
@@ -229,7 +230,7 @@ Jupiter Ultra provides the swap routing. The free tier is sufficient.
    JUP_API_KEY=jup_xxxxxxxxxxxxxxx
    ```
 
-### 4. OKX onchainos CLI
+### 4. OKX OnchainOS
 
 This is a **compiled Rust binary** (npm package) that wraps OKX's on-chain data API. It's used by both the price feed and the LLM advisor for smart-money trades, dev wallet activity, holder PnL, and kline data.
 
@@ -244,7 +245,17 @@ onchainos --version
 onchainos market price --address So11111111111111111111111111111111111111112 --chain solana
 ```
 
-**No API key configuration needed on your side** — the CLI handles auth internally via a baked-in credential. It's IPv4-only.
+Then create OnchainOS API credentials at [web3.okx.com/onchain-os/dev-portal](https://web3.okx.com/onchain-os/dev-portal). Use a read-only key and save the passphrase you set during creation.
+
+Set in `.env`:
+
+```env
+OKX_API_KEY=your-okx-api-key
+OKX_SECRET_KEY=your-okx-secret-key
+OKX_PASSPHRASE=your-okx-passphrase
+```
+
+The `onchainos` CLI expects `OKX_PASSPHRASE`. The bot also accepts the older local alias `OKX_API_PASSPHRASE` and passes it through as `OKX_PASSPHRASE` when spawning the CLI. It's IPv4-only.
 
 ### 5. Telegram bot
 
@@ -292,6 +303,9 @@ Create `.env` in the project root with these values:
 # === REQUIRED ===
 JUP_API_KEY=jup_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 HELIUS_API_KEY=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+OKX_API_KEY=your-okx-api-key
+OKX_SECRET_KEY=your-okx-secret-key
+OKX_PASSPHRASE=your-okx-passphrase
 PRIV_B58=base58-encoded-solana-keypair-secret
 
 # === RPC ===
@@ -474,7 +488,7 @@ Sent to your Telegram chat as events happen. Dedupe is built in so you don't get
 
 **NOT editable from Telegram (security boundary):**
 
-- API keys (`JUP_API_KEY`, `HELIUS_API_KEY`, `MINIMAX_API_KEY`, `TELEGRAM_BOT_TOKEN`)
+- API keys (`JUP_API_KEY`, `HELIUS_API_KEY`, `OKX_API_KEY`, `OKX_SECRET_KEY`, `OKX_PASSPHRASE`, `MINIMAX_API_KEY`, `TELEGRAM_BOT_TOKEN`)
 - Wallet key (`PRIV_B58`)
 - `DRY_RUN` (intentionally requires manual `.env` edit + restart)
 

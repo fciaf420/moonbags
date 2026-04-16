@@ -197,8 +197,33 @@ async function main(): Promise<void> {
     if (!cont) { rl.close(); process.exit(1); }
   }
 
-  // 2. Jupiter API key
-  section("Jupiter API key", 2);
+  // 2. OKX OnchainOS API credentials
+  section("OKX OnchainOS API credentials", 2);
+  console.log(gray("   OnchainOS powers token trades, smart-money flow, holder data,"));
+  console.log(gray("   risk data, and klines for the LLM advisor."));
+  console.log(`   Get keys at:  ${blue("https://web3.okx.com/onchain-os/dev-portal")}`);
+  console.log(gray("   Create a read-only API key and keep the passphrase you set."));
+  console.log("");
+  const okxKeyFromEnv = existingEnv.match(/^OKX_API_KEY=(.*)$/m)?.[1];
+  const okxSecretFromEnv = existingEnv.match(/^OKX_SECRET_KEY=(.*)$/m)?.[1];
+  const okxPassphraseFromEnv =
+    existingEnv.match(/^OKX_PASSPHRASE=(.*)$/m)?.[1] ??
+    existingEnv.match(/^OKX_API_PASSPHRASE=(.*)$/m)?.[1];
+  if (okxKeyFromEnv) console.log(`   ${dim(`current OKX_API_KEY: ${okxKeyFromEnv.slice(0, 10)}...`)}`);
+  if (okxSecretFromEnv) console.log(`   ${dim("current OKX_SECRET_KEY: set")}`);
+  if (okxPassphraseFromEnv) console.log(`   ${dim("current OKX_PASSPHRASE: set")}`);
+  const okxKey = await ask(`   ${bold("OKX_API_KEY")} ${dim("(blank to keep/skip)")}: `);
+  const okxSecret = await ask(`   ${bold("OKX_SECRET_KEY")} ${dim("(blank to keep/skip)")}: `);
+  const okxPassphrase = await ask(`   ${bold("OKX_PASSPHRASE")} ${dim("(blank to keep/skip)")}: `);
+  if (okxKey) collected.OKX_API_KEY = okxKey;
+  else if (!okxKeyFromEnv) collected.OKX_API_KEY = "";
+  if (okxSecret) collected.OKX_SECRET_KEY = okxSecret;
+  else if (!okxSecretFromEnv) collected.OKX_SECRET_KEY = "";
+  if (okxPassphrase) collected.OKX_PASSPHRASE = okxPassphrase;
+  else if (!okxPassphraseFromEnv) collected.OKX_PASSPHRASE = "";
+
+  // 3. Jupiter API key
+  section("Jupiter API key", 3);
   console.log(gray("   Jupiter Ultra provides swap routing (buy/sell execution)."));
   console.log(`   Get one at:  ${blue("https://developers.jup.ag/portal")}`);
   console.log("");
@@ -218,8 +243,8 @@ async function main(): Promise<void> {
     console.log(`   ${gray("·")} keeping existing value`);
   }
 
-  // 3. Helius RPC
-  section("Helius RPC key", 3);
+  // 4. Helius RPC
+  section("Helius RPC key", 4);
   console.log(gray("   Private Solana RPC. Free tier works. Public RPC is rate-limited."));
   console.log(`   Sign up at:  ${blue("https://dashboard.helius.dev")}`);
   console.log("");
@@ -239,8 +264,8 @@ async function main(): Promise<void> {
     console.log(`   ${gray("·")} keeping existing value`);
   }
 
-  // 4. Solana wallet
-  section("Solana wallet", 4);
+  // 5. Solana wallet
+  section("Solana wallet", 5);
   console.log(gray("   The bot signs swap transactions with this wallet."));
   console.log(coral("   ⚠  Use a DEDICATED wallet — not one that holds anything important."));
   console.log("");
@@ -255,11 +280,11 @@ async function main(): Promise<void> {
     await promptWalletSetup(collected);
   }
 
-  // 5. Telegram bot
-  section("Telegram bot (required for control + alerts)", 5);
+  // 6. Telegram bot
+  section("Telegram bot (required for control + alerts)", 6);
   console.log(gray("   You'll control the bot via Telegram: /start, /positions, /settings, etc."));
   console.log("");
-  console.log(bold("   Step 5a — create the bot:"));
+  console.log(bold("   Step 6a — create the bot:"));
   console.log(`     1. Open Telegram, message ${blue("@BotFather")}`);
   console.log(`     2. Send  ${yellow("/newbot")}  and follow the prompts`);
   console.log(`     3. Copy the bot token (looks like ${gray("8775xxxx:AAG...")})`);
@@ -286,7 +311,7 @@ async function main(): Promise<void> {
   // Chat ID auto-detection
   if (tgTokenToUse) {
     console.log("");
-    console.log(bold("   Step 5b — grant yourself access:"));
+    console.log(bold("   Step 6b — grant yourself access:"));
     const me = await testTelegramToken(tgTokenToUse);
     const botName = me?.username ? `@${me.username}` : "your bot";
     console.log(`     1. Open Telegram and message ${blue(botName)} (any text, e.g. ${yellow('"hello"')}).`);
@@ -305,8 +330,8 @@ async function main(): Promise<void> {
     }
   }
 
-  // 6. MiniMax (optional)
-  section("MiniMax API key — LLM exit advisor (optional)", 6);
+  // 7. MiniMax (optional)
+  section("MiniMax API key — LLM exit advisor (optional)", 7);
   console.log(gray("   Off by default. If enabled, MiniMax M2.7 manages exits for"));
   console.log(gray("   armed positions using live on-chain data. You can flip it on"));
   console.log(gray("   later via /llm in Telegram."));
@@ -321,8 +346,8 @@ async function main(): Promise<void> {
     collected.LLM_EXIT_ENABLED = enable ? "true" : "false";
   }
 
-  // 7. Trading params
-  section("Trading parameters", 7);
+  // 8. Trading params
+  section("Trading parameters", 8);
   console.log(gray("   Defaults are backtest-optimized against 100 trending Solana tokens."));
   console.log(gray("   Press Enter to accept each, or type a new value."));
   console.log(gray("   You can change any of these live via /settings in Telegram."));
@@ -364,11 +389,11 @@ async function main(): Promise<void> {
   if (!existingEnv.match(/^SLIPPAGE_BPS=/m)) collected.SLIPPAGE_BPS = "2500";
   if (!existingEnv.match(/^MAX_HOLD_SECS=/m)) collected.MAX_HOLD_SECS = "99999999999999999";
 
-  // 8. Write .env
-  section("Writing .env", 8);
+  // 9. Write .env
+  section("Writing .env", 9);
   console.log(gray("   Summary of changes:"));
   for (const [k, v] of Object.entries(collected)) {
-    const shown = /KEY|TOKEN|PRIV/.test(k) && v.length > 12 ? `${v.slice(0, 6)}…${v.slice(-4)}` : v;
+    const shown = /KEY|TOKEN|PRIV|SECRET|PASSPHRASE/.test(k) && v.length > 12 ? `${v.slice(0, 6)}…${v.slice(-4)}` : v;
     console.log(`     ${green(k)}=${yellow(shown)}`);
   }
   console.log("");
@@ -381,8 +406,8 @@ async function main(): Promise<void> {
   await writeEnvFile(collected, existingEnv);
   console.log(`   ${green("✓")} .env written.`);
 
-  // 9. Next steps
-  section("Next steps", 9);
+  // 10. Next steps
+  section("Next steps", 10);
   console.log(gray("   Your bot is configured. Recommended next steps:"));
   console.log("");
   console.log(`     ${green("npx tsx src/main.ts")}     ${gray("# start the bot")}`);
