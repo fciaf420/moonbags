@@ -37,6 +37,7 @@ import {
   recordDecision,
   getDecisions,
   computeTrends,
+  readLlmTradeRecords,
   type DecisionRecord,
 } from "./llmMemory.js";
 
@@ -93,6 +94,16 @@ For each open position you are given:
     If you tightened recently and the trade continued up, that's signal that
     the tighten was premature — consider LOOSENING back up via set_trail.
     Do not keep tightening on every poll: that compounds errors.
+  - (optional) a \`recent_track_record\` block. This ONLY appears after you
+    have ≥20 closed trades on record, and shows your verdict histogram across
+    recent trades: \`premature_tighten\` / \`correct_tighten\` / \`premature_exit\`
+    / \`correct_exit\` / \`held_well\` / \`stuck_loser\` / \`mixed\`. If this
+    block is present, use it to CORRECT your own biases:
+      * High premature_tighten count → you over-tighten. Weight HOLD harder.
+      * High premature_exit count → you jeet too early. Require stronger
+        convergence before calling exit_now.
+      * High stuck_loser count → you hold losers too long. Act on clear danger.
+    If this block is absent, you're still in cold-start data-collection mode.
 
 Position prices (entryPriceSol/currentPriceSol) are denominated in SOL per
 token. The token's USD price lives in snapshot.momentum.priceUsd. Do not
@@ -383,11 +394,31 @@ function buildRecentDecisions(mint: string): Array<Record<string, unknown>> {
 // ---------------------------------------------------------------------------
 // User-prompt builder
 // ---------------------------------------------------------------------------
-function buildUserPrompt(ctx: LlmContext, snapshot: PositionSnapshot): string {
-  // TODO (post-mortem injection): once state/llm_decisions.json has ≥20
-  // entries, read recent records via readLlmTradeRecords() and inject a
-  // "recent_track_record" summary so the LLM learns from prior outcomes.
-  const payload = {
+// Minimum closed LlmTradeRecords before the track-record injection self-activates.
+// Below this threshold we skip injection entirely; above it, we auto-include the
+// verdict histogram in every consult. No config flag — it just turns on once
+// there's enough data, and turns off automatically if state/llm_decisions.json
+// gets cleared. Intentionally simple.
+const TRACK_RECORD_THRESHOLD = 20;
+
+type TrackRecordSummary = {
+  total: number;
+  histogram: Record<string, number>;
+};
+
+async function buildTrackRecord(): Promise<TrackRecordSummary | null> {
+  const records = await readLlmTradeRecords(200).catch(() => []);
+  if (records.length < TRACK_RECORD_THRESHOLD) return null;
+  const histogram: Record<string, number> = {};
+  for (const r of records) {
+    histogram[r.verdict] = (histogram[r.verdict] ?? 0) + 1;
+  }
+  return { total: records.length, histogram };
+}
+
+async function buildUserPrompt(ctx: LlmContext, snapshot: PositionSnapshot): Promise<string> {
+  const trackRecord = await buildTrackRecord();
+  const payload: Record<string, unknown> = {
     position: {
       name: ctx.name,
       mint: ctx.mint,
@@ -409,6 +440,9 @@ function buildUserPrompt(ctx: LlmContext, snapshot: PositionSnapshot): string {
     trends: buildTrendsPayload(ctx.mint),
     recentDecisions: buildRecentDecisions(ctx.mint),
   };
+  // Only inject track record once we have enough closed trades to be meaningful.
+  if (trackRecord) payload.recent_track_record = trackRecord;
+
   return [
     "Decide the exit action for this position using the philosophy in the system prompt.",
     "Call submit_decision exactly once.",
@@ -569,9 +603,10 @@ export async function consultLlm(
     return null;
   }
 
+  const userPrompt = await buildUserPrompt(ctx, snapshot);
   const messages: ChatMessage[] = [
     { role: "system", content: SYSTEM_PROMPT },
-    { role: "user", content: buildUserPrompt(ctx, snapshot) },
+    { role: "user", content: userPrompt },
   ];
 
   const start = Date.now();
