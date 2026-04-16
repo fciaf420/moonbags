@@ -2,7 +2,7 @@
 
 > Solana meme-token auto-trading bot with LLM-powered exit decisions.
 
-MoonBags listens for [SCG Alpha](https://scgalpha.com) alerts, buys promising meme tokens via Jupiter, and manages exits using a configurable trail/stop or — optionally — a MiniMax M2.7 LLM that reads on-chain data (smart money flow, dev holdings, holder PnL, kline trends) every 30 seconds to decide when to sell.
+MoonBags listens for [SCG Alpha](https://x.com/scg_alpha) alerts, buys promising meme tokens via Jupiter, and manages exits using a configurable trail/stop or — optionally — a MiniMax M2.7 LLM that reads on-chain data (smart money flow, dev holdings, holder PnL, kline trends) every 30 seconds to decide when to sell.
 
 You operate the bot through a Telegram bot (`/start`, `/positions`, `/settings`, `/sellall`, etc.) or a local web dashboard.
 
@@ -12,7 +12,7 @@ You operate the bot through a Telegram bot (`/start`, `/positions`, `/settings`,
 
 **Not financial advice.** This software is released for educational and research purposes. Using it to trade real money is your decision and your risk alone. Meme coins are extremely volatile — **you will have losing trades, and you can lose your entire wallet balance**. Nothing in this repo, the dashboard, the Telegram bot, or the LLM advisor's output constitutes investment, legal, tax, or any other kind of professional advice. Do your own research.
 
-**Third-party dependency — SCG Alpha.** MoonBags sources its trading signals from the [SCG Alpha](https://scgalpha.com) alerts API. **I do not own, operate, or control SCG Alpha.** If they change their API shape, rate limits, pricing, or shut the service down entirely, the bot's alert intake stops working until the code is updated to match. You're also subject to whatever terms of service SCG Alpha imposes on their API — please review them. If you want a different signal source, you'd need to replace `src/scgPoller.ts` with your own integration.
+**Third-party dependency — SCG Alpha.** MoonBags sources its trading signals from the SCG Alpha alerts API ([@scg_alpha on X](https://x.com/scg_alpha)). **I do not own, operate, or control SCG Alpha** — all credit for the signal quality goes to them. If they change their API shape, rate limits, pricing, or shut the service down entirely, the bot's alert intake stops working until the code is updated to match. You're also subject to whatever terms of service SCG Alpha imposes on their API — please review them. If you want a different signal source, you'd need to replace `src/scgPoller.ts` with your own integration.
 
 Other third-party services the bot depends on (any of which can break the bot if they change): **Jupiter Ultra** (swap execution + fees), **Helius RPC** (Solana reads), **OKX onchainos CLI** (on-chain data enrichment), **MiniMax** (LLM advisor, optional), **Telegram Bot API** (control + notifications).
 
