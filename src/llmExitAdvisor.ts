@@ -32,12 +32,19 @@ import type {
   SignalRecord,
   Candle,
 } from "./okxClient.js";
+import {
+  recordSnapshot,
+  recordDecision,
+  getDecisions,
+  computeTrends,
+  type DecisionRecord,
+} from "./llmMemory.js";
 
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 export type LlmDecision = {
-  action: "hold" | "exit_now" | "tighten_trail";
+  action: "hold" | "exit_now" | "set_trail";
   reason: string;
   newTrailPct?: number;
 };
@@ -51,6 +58,7 @@ export type LlmContext = {
   peakPnlPct: number;
   drawdownFromPeakPct: number;
   currentTrailPct: number;
+  ceilingTrailPct: number;       // CONFIG.TRAIL_PCT — max trail the LLM may set
   holdSecs: number;
 };
 
@@ -69,49 +77,80 @@ const SYSTEM_PROMPT = `You are an exit-decision advisor for a Solana meme-token 
 
 For each open position you are given:
   - the position context (entry, current price, PnL %, peak PnL %, drawdown
-    from peak, the trailing-stop % currently in effect, hold duration)
+    from peak, the trailing-stop % currently in effect, the MAX trail allowed
+    (ceilingTrailPctDecimal), hold duration)
   - an on-chain snapshot: price/volume momentum across 5m/1h/4h/24h, recent
     smart-money / bundler / dev / whale / insider trade windows, top-10
     holders' avg PnL and trend, liquidity pools, token risk profile, recent
     smart-money signals, and a compact 1m + 5m kline summary.
+  - a \`trends\` block showing how each signal has EVOLVED over the last ~5
+    snapshots (oldest → newest, spanning ~2 minutes). Use it to distinguish:
+      * ACCELERATING bullish (smart money + volume both climbing): don't tighten
+      * DECELERATING pump (price rising but volume/flow fading): consider tightening
+      * BLOWOFF TOP (vertical price + smart-money NET SELLING): consider exit
+      * Cold start (trends == null): be conservative, prefer hold
+  - a \`recentDecisions\` block showing YOUR prior decisions on this position.
+    If you tightened recently and the trade continued up, that's signal that
+    the tighten was premature — consider LOOSENING back up via set_trail.
+    Do not keep tightening on every poll: that compounds errors.
 
 Position prices (entryPriceSol/currentPriceSol) are denominated in SOL per
 token. The token's USD price lives in snapshot.momentum.priceUsd. Do not
 compare these directly without converting.
 
 Your job is to choose ONE of three actions:
-  - "hold"          — leave the existing trailing stop alone
-  - "tighten_trail" — lower the trail to lock in more profit (provide
-                      new_trail_pct as a decimal in (0, currentTrailPctDecimal))
-  - "exit_now"      — sell the entire position immediately
+  - "hold"       — leave the existing trailing stop alone
+  - "set_trail"  — change the trail % in either direction. new_trail_pct must
+                   be in (0, ceilingTrailPctDecimal]. Use this to tighten when
+                   warranted, or LOOSEN (up to the ceiling) if a prior tighten
+                   looks premature now.
+  - "exit_now"   — sell the entire position immediately
 
-Exit philosophy (apply strictly):
-  1. PAST DEV BEHAVIOR DOES NOT MATTER. devCreateTokenCount,
-     devLaunchedTokenCount, and devRugPullTokenCount are history. Only
-     CURRENT dev pressure matters.
-  2. If risk.devHoldingPercent === 0, the dev is OUT — there is no future
-     dev dump pressure. Do NOT use prior rugs as an exit reason.
-  3. If risk.devHoldingPercent > 0 AND the dev trade window shows sells,
-     that is a STRONG exit cue — call exit_now or tighten aggressively.
-  4. Bundlers selling at the top (bundlers.netFlowSol << 0) is mildly
-     bearish but not exit-worthy on its own; combine with other cues.
-  5. Top-10 holders deeply underwater (topHolders.averagePnlUsd << 0) is
-     capitulation risk if price rolls over — favor tightening when momentum
-     also fades.
-  6. Smart money flipping from net-buy to net-sell (smartMoney.netFlowSol
-     << 0 with recent sell volume) is a STRONG exit cue.
-  7. Volume cliff (e.g. volume5m collapsed vs. volume1h/12 implied rate)
-     means momentum is dead — favor tighten_trail or exit_now if PnL is
-     positive and drawdown is widening.
-  8. If nothing alarming is happening and momentum is intact, prefer
-     "hold". Do not overtrade. The trailing stop already protects profit.
+EXIT PHILOSOPHY — DEFAULT ACTION IS HOLD.
 
-Constraints on tighten_trail:
+Your job is to identify the MINORITY of cases where action is warranted.
+For every 10 consultations, 8 should be hold. The static trail you were
+given (currentTrailPctDecimal, with ceiling at ceilingTrailPctDecimal)
+is already the backtest-optimized answer across 100 tokens. Your job is
+to refine it in EXCEPTIONAL cases, not improve it in average ones.
+
+Tighten (set_trail with new_trail_pct < current) ONLY if ≥2 of these
+converge (single signals are noise):
+  - Smart money net-SELLING AND wallet count > 3 unique sellers
+  - Dev holding > 0% AND dev trade window shows sells
+  - Bundlers net-SELLING over 30 min AND top holders capitulating
+    (topHolders.averagePnlUsd << 0 and trending sell)
+  - Volume cliff: volume5m < volume1h / 20
+
+Exit (exit_now) ONLY if ≥3 of the above converge, OR a dev with holding
+> 1% is selling hard (dev.sellVolumeSol >> dev.buyVolumeSol over 30m).
+
+Loosen (set_trail with new_trail_pct > current) when YOUR OWN prior
+decision was a tighten AND subsequent evidence has invalidated it:
+  - Price continued up after you tightened
+  - On-chain signals (smart money, dev, bundlers) all net-positive
+  - Your recent decisions show repeated tightens with no exit trigger
+Cap at ceilingTrailPctDecimal.
+
+NEVER tighten on chart shape alone. A single vertical candle is NOISE.
+Parabolic moves in meme coins often continue for 2-5 more candles —
+your job is not to call the top. The trailing stop calls the top.
+
+ALSO:
+  - PAST DEV BEHAVIOR DOES NOT MATTER. devCreateTokenCount / devLaunched
+    / devRugPull are HISTORY. Only CURRENT dev pressure matters.
+  - If risk.devHoldingPercent === 0, the dev is OUT — there is no future
+    dev dump pressure. Do NOT cite prior rugs as an exit reason.
+  - Top-10 holders deeply underwater is only bearish WHEN combined with
+    fading momentum. On its own, it's not a signal.
+
+Constraints on set_trail:
   - new_trail_pct is a DECIMAL (0.0 to 1.0), NOT whole percent.
-    e.g. 0.20 means 20% trail. 20.0 would be invalid (>= currentTrailPctDecimal).
-  - Must be in the OPEN interval (0, currentTrailPctDecimal).
-  - Tighter (smaller) than current. Typical values: 0.10 to 0.30.
-  - If you can't justify a number tighter than the current trail, use "hold".
+    e.g. 0.20 means 20% trail.
+  - Must be in the interval (0, ceilingTrailPctDecimal].
+  - May be TIGHTER than current (smaller) to lock in profit, or LOOSER
+    than current (larger, up to ceiling) to undo a premature tighten.
+  - If you can't justify a number different from the current trail, use "hold".
 
 Output: you MUST respond by calling the submit_decision tool. Do not write
 prose. The "reason" field is shown to the user in Telegram — keep it to
@@ -131,9 +170,9 @@ const SUBMIT_DECISION_TOOL = {
       properties: {
         action: {
           type: "string",
-          enum: ["hold", "exit_now", "tighten_trail"],
+          enum: ["hold", "exit_now", "set_trail"],
           description:
-            "hold = keep existing trail; exit_now = sell entire position immediately; tighten_trail = lower the trail %.",
+            "hold = keep existing trail; exit_now = sell entire position immediately; set_trail = change the trail % (tighter or looser, capped at ceilingTrailPctDecimal).",
         },
         reason: {
           type: "string",
@@ -143,7 +182,7 @@ const SUBMIT_DECISION_TOOL = {
         new_trail_pct: {
           type: "number",
           description:
-            "REQUIRED only when action = tighten_trail. Decimal in (0, currentTrailPctDecimal), e.g. 0.20 for a 20% trail.",
+            "REQUIRED only when action = set_trail. Decimal in (0, ceilingTrailPctDecimal], e.g. 0.20 for a 20% trail. May be tighter OR looser than the current trail, but never above the ceiling.",
         },
       },
       required: ["action", "reason"],
@@ -295,9 +334,59 @@ function compactSnapshot(snapshot: PositionSnapshot): unknown {
 }
 
 // ---------------------------------------------------------------------------
+// Trend + decision-history payload builders
+// ---------------------------------------------------------------------------
+function buildTrendsPayload(mint: string): unknown {
+  const t = computeTrends(mint);
+  if (!t) return null;
+  const fmtArr = (arr: number[], digits = 2): number[] =>
+    arr.map((v) => fmtNum(v, digits));
+  return {
+    samples: t.samples,
+    ageSecs_oldest_to_newest: t.ageSecs,
+    price_usd: fmtArr(t.price, 10),
+    volume5m_usd: fmtArr(t.volume5m, 0),
+    priceChange5m_pct: fmtArr(t.priceChange5m, 2),
+    holders: t.holders,
+    smartMoney_netFlowSol: fmtArr(t.smartMoneyNetFlow, 4),
+    bundlers_netFlowSol: fmtArr(t.bundlersNetFlow, 4),
+    dev_netFlowSol: fmtArr(t.devNetFlow, 4),
+    whales_netFlowSol: fmtArr(t.whalesNetFlow, 4),
+    topHolders_avgPnl_usd: fmtArr(t.topHoldersAvgPnl, 2),
+    liquidity_usd: fmtArr(t.liquidityTotal, 0),
+  };
+}
+
+function buildRecentDecisions(mint: string): Array<Record<string, unknown>> {
+  const decs = getDecisions(mint);
+  if (decs.length === 0) return [];
+  const now = Date.now();
+  // keep last 5, oldest → newest
+  const slice = decs.slice(-5);
+  return slice.map((d) => {
+    const base: Record<string, unknown> = {
+      ageSecs: Math.floor((now - d.at) / 1000),
+      action: d.action,
+      reason: d.reason,
+    };
+    if (
+      (d.action === "set_trail" || d.action === "tighten_trail") &&
+      d.newTrailPct != null
+    ) {
+      base.from = fmtNum(d.oldTrailPct, 4);
+      base.to = fmtNum(d.newTrailPct, 4);
+    }
+    return base;
+  });
+}
+
+// ---------------------------------------------------------------------------
 // User-prompt builder
 // ---------------------------------------------------------------------------
 function buildUserPrompt(ctx: LlmContext, snapshot: PositionSnapshot): string {
+  // TODO (post-mortem injection): once state/llm_decisions.json has ≥20
+  // entries, read recent records via readLlmTradeRecords() and inject a
+  // "recent_track_record" summary so the LLM learns from prior outcomes.
   const payload = {
     position: {
       name: ctx.name,
@@ -307,15 +396,18 @@ function buildUserPrompt(ctx: LlmContext, snapshot: PositionSnapshot): string {
       entryPriceSol: fmtNum(ctx.entryPriceUsd, 12),    // bump precision for tiny SOL values
       currentPriceSol: fmtNum(ctx.currentPriceUsd, 12),
       // All "...Pct" fields are in WHOLE PERCENT (e.g. 234 means +234%).
-      // The trail field is named *Decimal* explicitly because new_trail_pct
+      // The trail fields are named *Decimal* explicitly because new_trail_pct
       // must be in the SAME decimal scale (0.0 – 1.0+).
       pnlPct: fmtNum(ctx.pnlPct * 100, 2),
       peakPnlPct: fmtNum(ctx.peakPnlPct * 100, 2),
       drawdownFromPeakPct: fmtNum(ctx.drawdownFromPeakPct * 100, 2),
       currentTrailPctDecimal: fmtNum(ctx.currentTrailPct, 4),
+      ceilingTrailPctDecimal: fmtNum(ctx.ceilingTrailPct, 4),
       holdSecs: ctx.holdSecs,
     },
     snapshot: compactSnapshot(snapshot),
+    trends: buildTrendsPayload(ctx.mint),
+    recentDecisions: buildRecentDecisions(ctx.mint),
   };
   return [
     "Decide the exit action for this position using the philosophy in the system prompt.",
@@ -422,7 +514,10 @@ function parseDecision(
     return null;
   }
 
-  const action = args.action;
+  // Accept legacy "tighten_trail" action from older model outputs and alias to set_trail.
+  let action = args.action;
+  if (action === "tighten_trail") action = "set_trail";
+
   const reason = (args.reason ?? "").trim();
   if (!reason) {
     logger.warn("[llm] decision missing reason");
@@ -432,16 +527,20 @@ function parseDecision(
   if (action === "hold" || action === "exit_now") {
     return { action, reason };
   }
-  if (action === "tighten_trail") {
+  if (action === "set_trail") {
     const newTrailPct = Number(args.new_trail_pct);
     if (
       !Number.isFinite(newTrailPct) ||
       newTrailPct <= 0 ||
-      newTrailPct >= ctx.currentTrailPct
+      newTrailPct > ctx.ceilingTrailPct
     ) {
       logger.warn(
-        { newTrailPct, currentTrailPct: ctx.currentTrailPct },
-        "[llm] tighten_trail with invalid new_trail_pct",
+        {
+          newTrailPct,
+          currentTrailPct: ctx.currentTrailPct,
+          ceilingTrailPct: ctx.ceilingTrailPct,
+        },
+        "[llm] set_trail with invalid new_trail_pct (must be in (0, ceilingTrailPctDecimal])",
       );
       return null;
     }
@@ -459,6 +558,11 @@ export async function consultLlm(
   ctx: LlmContext,
   snapshot: PositionSnapshot,
 ): Promise<LlmDecision | null> {
+  // Record the snapshot into L2 memory BEFORE prompting. computeTrends() uses
+  // the ring including this latest sample, so the newest entry in the trend
+  // vectors is "what the LLM is looking at right now".
+  recordSnapshot(ctx.mint, snapshot);
+
   const apiKey = process.env.MINIMAX_API_KEY;
   if (!apiKey) {
     logger.warn("[llm] MINIMAX_API_KEY missing — skipping LLM consult");
@@ -486,6 +590,17 @@ export async function consultLlm(
       },
       "[llm] decision",
     );
+    // Record the decision into L2 memory so the NEXT consult sees it.
+    const decRec: DecisionRecord = {
+      at: Date.now(),
+      action: decision.action,
+      newTrailPct: decision.newTrailPct,
+      oldTrailPct: ctx.currentTrailPct,
+      reason: decision.reason,
+      pnlPct: ctx.pnlPct,
+      peakPnlPct: ctx.peakPnlPct,
+    };
+    recordDecision(ctx.mint, decRec);
   }
   return decision;
 }

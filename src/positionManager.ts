@@ -8,6 +8,13 @@ import { getBatchPricesParallel, getPriceViaSellQuote } from "./priceFeed.js";
 import { notifyBuy, notifyBuyFail, notifySell, notifySellFail, notifyArmed, notifyMoonbagStart, notifyLlmActive, notifyLlmTighten } from "./notifier.js";
 import { consultLlm, type LlmContext } from "./llmExitAdvisor.js";
 import { getPositionSnapshot } from "./okxClient.js";
+import {
+  appendLlmTradeRecord,
+  computeVerdict,
+  getDecisions,
+  clearMint as clearLlmMemory,
+  type LlmTradeRecord,
+} from "./llmMemory.js";
 
 const positions = new Map<string, Position>();
 const BOOT_AT = Date.now();
@@ -659,6 +666,33 @@ async function closePosition(mint: string, reason: "trail" | "stop" | "timeout" 
     reason, llmReason: reason === "llm" ? position.lastLlmReason : undefined,
     exitSig: sellResult.signature,
   });
+
+  // L3 shadow logger: persist decision timeline + post-mortem verdict so
+  // future PRs can inject a "recent track record" block back into the prompt.
+  if (CONFIG.LLM_EXIT_ENABLED) {
+    const decisions = getDecisions(mint);
+    if (decisions.length > 0) {
+      const base: Omit<LlmTradeRecord, "verdict"> = {
+        mint,
+        name: position.name,
+        openedAt: position.openedAt,
+        closedAt: Date.now(),
+        holdSecs: holdSecsLog,
+        entryPnlPct: 0,
+        // Store PnL as a decimal (0.574 for +57.4%) — this is the scale the
+        // verdict heuristic reasons about, not the whole-percent log value.
+        exitPnlPct: entrySol > 0 ? exitSol / entrySol - 1 : 0,
+        peakPnlPct: position.entryPricePerTokenSol > 0
+          ? position.peakPricePerTokenSol / position.entryPricePerTokenSol - 1
+          : 0,
+        exitReason: reason,
+        decisions,
+      };
+      const verdict = computeVerdict(base);
+      void appendLlmTradeRecord({ ...base, verdict });
+    }
+    clearLlmMemory(mint);
+  }
   void notifySell({
     name: position.name,
     mint,
@@ -742,6 +776,7 @@ async function consultOnePosition(position: Position): Promise<void> {
     peakPnlPct: peak / entry - 1,
     drawdownFromPeakPct: 1 - current / peak,
     currentTrailPct: position.dynamicTrailPct ?? CONFIG.TRAIL_PCT,
+    ceilingTrailPct: CONFIG.TRAIL_PCT,           // user-configured default is the max trail allowed
     holdSecs: Math.floor((Date.now() - position.openedAt) / 1000),
   };
 
@@ -759,20 +794,24 @@ async function consultOnePosition(position: Position): Promise<void> {
     return;
   }
 
-  if (decision.action === "tighten_trail" && decision.newTrailPct != null) {
+  if (decision.action === "set_trail" && decision.newTrailPct != null) {
     const oldTrail = position.dynamicTrailPct ?? CONFIG.TRAIL_PCT;
-    // Dedupe: only act + notify if this is a meaningful change
+    // Dedupe: only act + notify if this is a meaningful change (either direction)
     if (Math.abs(decision.newTrailPct - oldTrail) < 0.01) {
-      logger.debug({ mint: position.mint, oldTrail, newTrail: decision.newTrailPct }, "[llm] tighten no-op");
+      logger.debug({ mint: position.mint, oldTrail, newTrail: decision.newTrailPct }, "[llm] set_trail no-op");
       return;
     }
+    const direction = decision.newTrailPct < oldTrail ? "tightened" : "loosened";
     position.dynamicTrailPct = decision.newTrailPct;
     position.lastLlmReason = decision.reason;
     markDirty();
     logger.info(
-      { mint: position.mint, oldTrail, newTrail: decision.newTrailPct, reason: decision.reason },
-      "[llm] tightened trail",
+      { mint: position.mint, oldTrail, newTrail: decision.newTrailPct, direction, reason: decision.reason },
+      "[llm] trail changed",
     );
+    // TODO: notifier.ts currently says "tightened" explicitly. Reuse for now;
+    // revisit when notifier gets a generic "trail changed" variant that handles
+    // both tighten and loosen copy.
     void notifyLlmTighten({
       name: position.name,
       mint: position.mint,
