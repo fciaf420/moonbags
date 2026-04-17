@@ -8,6 +8,7 @@
   },
   "scripts": {
     "setup": "tsx src/_setup.ts",
+    "install:onchainos": "curl -sSL https://raw.githubusercontent.com/okx/onchainos-skills/main/install.sh | sh",
     "dev": "tsx watch src/main.ts",
     "start": "node --import tsx src/main.ts",
     "typecheck": "tsc --noEmit"

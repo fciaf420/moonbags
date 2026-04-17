@@ -146,7 +146,7 @@ cd moonbags
 npm install
 
 # 2. Install the OKX onchainos CLI (provides on-chain data)
-curl -sSL https://raw.githubusercontent.com/okx/onchainos-skills/main/install.sh | sh
+npm run install:onchainos
 
 # 3. Run the wizard
 npm run setup
@@ -235,7 +235,7 @@ Jupiter Ultra provides the swap routing. The free tier is sufficient.
 This is a **compiled Rust binary** (npm package) that wraps OKX's on-chain data API. It's used by both the price feed and the LLM advisor for smart-money trades, dev wallet activity, holder PnL, and kline data.
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/okx/onchainos-skills/main/install.sh | sh
+npm run install:onchainos
 ```
 
 The installer places the `onchainos` binary on your user PATH, commonly under `~/.local/bin`. If `which onchainos` still returns nothing, open a new terminal or add that directory to your shell PATH.
@@ -251,7 +251,7 @@ onchainos market price --address So11111111111111111111111111111111111111112 --c
 Use `onchainos 2.1.0` or newer. If `/backtest` fails with `unrecognized subcommand 'trending'`, rerun the installer to update the CLI and restart the bot:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/okx/onchainos-skills/main/install.sh | sh
+npm run install:onchainos
 ```
 
 Then create OnchainOS API credentials at [web3.okx.com/onchain-os/dev-portal](https://web3.okx.com/onchain-os/dev-portal). Use a read-only key and save the passphrase you set during creation.
@@ -772,7 +772,7 @@ Useful for manually evaluating a token before whitelisting it, or debugging why 
 The `onchainos` CLI is intermittently rate-limited or having auth issues. The bot **automatically falls back to Jupiter Ultra sell quotes** for affected tokens — no action needed. If it persists for >5 minutes, check:
 
 - Is `onchainos --version` working from the shell?
-- If `/backtest` says `unrecognized subcommand 'trending'`, update the CLI with `curl -sSL https://raw.githubusercontent.com/okx/onchainos-skills/main/install.sh | sh`, then restart the bot. `onchainos 2.1.0` supports `token trending`.
+- If `/backtest` says `unrecognized subcommand 'trending'`, update the CLI with `npm run install:onchainos`, then restart the bot. `onchainos 2.1.0` supports `token trending`.
 - Are you on IPv4? `onchainos` does NOT support IPv6. Run `curl -6 -s https://ipv6.icanhazip.com || curl -s https://ipv4.icanhazip.com` — if you get an IPv6 response, disable IPv6 on your network interface.
 
 ### `MINIMAX_API_KEY missing — skipping LLM consult`
