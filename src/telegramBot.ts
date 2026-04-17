@@ -5,6 +5,7 @@ import { getWalletSolBalance, getWalletAddress } from "./jupClient.js";
 import { isPaused, setPaused, addToBlacklist, removeFromBlacklist, getBlacklist } from "./scgPoller.js";
 import { getPositionSnapshot } from "./okxClient.js";
 import { escapeHtml } from "./notifier.js";
+import { runBacktest } from "./_backtest.js";
 import type { Position } from "./types.js";
 
 type Update = {
@@ -259,6 +260,12 @@ async function handleCallback(cq: NonNullable<Update["callback_query"]>): Promis
   if (data === "menu:settings") {
     await tgPost("answerCallbackQuery", { callback_query_id: cq.id });
     await sendSettingsMenu(chatId);
+    return;
+  }
+
+  if (data.startsWith("adopt:")) {
+    await tgPost("answerCallbackQuery", { callback_query_id: cq.id, text: "Applying..." });
+    await handleAdopt(chatId, data);
     return;
   }
 
@@ -561,6 +568,170 @@ async function handleWallet(chatId: number): Promise<void> {
   });
 }
 
+// ---------------------------------------------------------------------------
+// /backtest — run a backtest on 100 trending Solana tokens, present top 5
+// combos vs the user's current config, and let them adopt any row with a
+// tap (writes live to .env via setConfigValue, no restart needed).
+// ---------------------------------------------------------------------------
+let backtestInFlight = false;
+
+async function handleBacktest(chatId: number): Promise<void> {
+  if (backtestInFlight) {
+    await tgPost("sendMessage", {
+      chat_id: chatId,
+      text: "⏳ Backtest already running. Wait for it to finish — they take ~60s.",
+    });
+    return;
+  }
+  backtestInFlight = true;
+
+  // Status message we'll update as progress happens
+  const startMsg = await tgPost("sendMessage", {
+    chat_id: chatId,
+    text:
+      "🧪 <b>Running backtest...</b>\n" +
+      "<i>Fetching top 100 trending Solana tokens + 5m klines...\n" +
+      "This takes ~60 seconds.</i>",
+    parse_mode: "HTML",
+  }) as { result?: { message_id?: number } };
+  const statusId = startMsg?.result?.message_id;
+
+  try {
+    const { topResults, allResults, samplesUsed, tokensFetched, durationMs } = await runBacktest({
+      bar: "5m",
+      topN: 5,
+      minCandles: 60,
+    });
+
+    if (!topResults.length) {
+      await tgPost("sendMessage", {
+        chat_id: chatId,
+        text: "❌ Backtest returned no results. Check onchainos CLI connectivity.",
+      });
+      return;
+    }
+
+    // Where does the CURRENT config rank?
+    const curArm = CONFIG.ARM_PCT;
+    const curTrail = CONFIG.TRAIL_PCT;
+    const curStop = CONFIG.STOP_PCT;
+    const curIdx = allResults.findIndex(
+      (r) => Math.abs(r.arm - curArm) < 0.001 && Math.abs(r.trail - curTrail) < 0.001 && Math.abs(r.stop - curStop) < 0.001,
+    );
+    const curRow = curIdx >= 0 ? allResults[curIdx] : null;
+
+    // Build message
+    const lines: string[] = [];
+    lines.push(`🧪 <b>Backtest complete</b>`);
+    lines.push(`<i>${samplesUsed}/${tokensFetched} tokens · ${allResults.length} combos · ${Math.round(durationMs/1000)}s</i>`);
+    lines.push("");
+
+    if (curRow) {
+      const curWinPct = (curRow.wins / (curRow.wins + curRow.losses || 1)) * 100;
+      const rank = curIdx + 1;
+      lines.push(`<b>Your current:</b>  ARM ${(curArm*100).toFixed(0)}% / TRAIL ${(curTrail*100).toFixed(0)}% / STOP ${(curStop*100).toFixed(0)}%`);
+      lines.push(`   +${curRow.totalPnlPct.toFixed(0)}%  ·  avg +${curRow.avgExitPct.toFixed(0)}%/trade  ·  ${curRow.wins}W/${curRow.losses}L/${curRow.holding}H  ·  ${curWinPct.toFixed(0)}% win  ·  <b>rank #${rank}/${allResults.length}</b>`);
+    } else {
+      lines.push(`<b>Your current</b> (ARM ${(curArm*100).toFixed(0)}% / TRAIL ${(curTrail*100).toFixed(0)}% / STOP ${(curStop*100).toFixed(0)}%) isn't in the test grid.`);
+    }
+    lines.push("");
+    lines.push(`<b>Top 5 combos:</b>`);
+
+    for (let i = 0; i < topResults.length; i++) {
+      const r = topResults[i]!;
+      const winPct = (r.wins / (r.wins + r.losses || 1)) * 100;
+      const isCurrent = curIdx === i;
+      const marker = isCurrent ? " ← your current" : "";
+      lines.push(
+        `<b>#${i+1}</b>  ARM ${(r.arm*100).toFixed(0)}% / TRAIL ${(r.trail*100).toFixed(0)}% / STOP ${(r.stop*100).toFixed(0)}%${marker}\n` +
+        `   +${r.totalPnlPct.toFixed(0)}%  ·  avg +${r.avgExitPct.toFixed(0)}%/trade  ·  ${r.wins}W/${r.losses}L/${r.holding}H  ·  ${winPct.toFixed(0)}% win`,
+      );
+    }
+    lines.push("");
+    lines.push(`<i>Tap a row to adopt (applies live, no restart needed).</i>`);
+
+    // Buttons — one per top result + a cancel
+    const buttons = topResults.map((r, i): [{ text: string; callback_data: string }] => ([{
+      text: `Adopt #${i+1}: ARM ${(r.arm*100).toFixed(0)}% TRAIL ${(r.trail*100).toFixed(0)}% STOP ${(r.stop*100).toFixed(0)}%`,
+      callback_data: `adopt:${r.arm.toFixed(2)}:${r.trail.toFixed(2)}:${r.stop.toFixed(2)}`,
+    }]));
+    buttons.push([{ text: "❌ Cancel", callback_data: "adopt:cancel" }]);
+
+    // Replace the status message with final result
+    if (statusId) {
+      await tgPost("editMessageText", {
+        chat_id: chatId,
+        message_id: statusId,
+        text: lines.join("\n"),
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: buttons },
+      });
+    } else {
+      await tgPost("sendMessage", {
+        chat_id: chatId,
+        text: lines.join("\n"),
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: buttons },
+      });
+    }
+  } catch (err) {
+    logger.warn({ err: (err as Error).message }, "[telegram] backtest failed");
+    await tgPost("sendMessage", {
+      chat_id: chatId,
+      text: `❌ Backtest failed: ${escapeHtml((err as Error).message)}`,
+      parse_mode: "HTML",
+    });
+  } finally {
+    backtestInFlight = false;
+  }
+}
+
+async function handleAdopt(chatId: number, data: string): Promise<void> {
+  // data = "adopt:arm:trail:stop" or "adopt:cancel"
+  const parts = data.split(":");
+  if (parts[1] === "cancel") {
+    await tgPost("sendMessage", { chat_id: chatId, text: "❌ Cancelled. Config unchanged." });
+    return;
+  }
+  const arm = parts[1];
+  const trail = parts[2];
+  const stop = parts[3];
+  if (!arm || !trail || !stop) {
+    await tgPost("sendMessage", { chat_id: chatId, text: "⚠️ Malformed adopt data." });
+    return;
+  }
+
+  // Apply each via setConfigValue — live, persists to .env
+  const results = [
+    { key: "ARM_PCT" as const, value: arm, result: setConfigValue("ARM_PCT", arm) },
+    { key: "TRAIL_PCT" as const, value: trail, result: setConfigValue("TRAIL_PCT", trail) },
+    { key: "STOP_PCT" as const, value: stop, result: setConfigValue("STOP_PCT", stop) },
+  ];
+  const failures = results.filter(r => !r.result.ok);
+
+  if (failures.length > 0) {
+    await tgPost("sendMessage", {
+      chat_id: chatId,
+      text: `⚠️ Adopt partially failed:\n${failures.map(f => `${f.key}=${f.value} → ${(f.result as { ok: false; error: string }).error}`).join("\n")}`,
+    });
+    return;
+  }
+
+  logger.info({ arm, trail, stop }, "[telegram] backtest config adopted");
+  await tgPost("sendMessage", {
+    chat_id: chatId,
+    text:
+      `✅ <b>Adopted new config</b>\n` +
+      `ARM: ${(parseFloat(arm)*100).toFixed(0)}%\n` +
+      `TRAIL: ${(parseFloat(trail)*100).toFixed(0)}%\n` +
+      `STOP: ${(parseFloat(stop)*100).toFixed(0)}%\n\n` +
+      `<i>Saved to .env and active on next tick. No restart needed.</i>`,
+    parse_mode: "HTML",
+  });
+}
+
 export function startTelegramBot(): () => void {
   if (!enabled()) {
     logger.info("[telegram] disabled — set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to enable");
@@ -586,6 +757,7 @@ export function startTelegramBot(): () => void {
       { command: "skip",      description: "Blacklist a mint (or list/clear)" },
       { command: "mint",      description: "On-demand on-chain snapshot of any token" },
       { command: "wallet",    description: "Show wallet address + SOL balance" },
+      { command: "backtest",  description: "Run backtest + adopt optimal ARM/TRAIL/STOP live" },
     ],
   });
 
@@ -655,6 +827,7 @@ export function startTelegramBot(): () => void {
               case "/skip":      await handleSkip(chatId, argText); break;
               case "/mint":      await handleMint(chatId, argText); break;
               case "/wallet":    await handleWallet(chatId); break;
+              case "/backtest":  await handleBacktest(chatId); break;
             }
           } catch (err) {
             logger.warn({ err: (err as Error).message, cmd }, "[telegram] command handler threw");

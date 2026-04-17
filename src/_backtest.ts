@@ -89,13 +89,13 @@ async function fetchTrendingTokens(): Promise<TokenSample[]> {
 // ---------------------------------------------------------------------------
 // Fetch OKX klines for one token
 // ---------------------------------------------------------------------------
-async function fetchKlines(address: string): Promise<Candle[]> {
+async function fetchKlines(address: string, bar: string = BAR): Promise<Candle[]> {
   try {
     const { stdout } = await execFileAsync("onchainos", [
       "market", "kline",
       "--address", address,
       "--chain", "solana",
-      "--bar", BAR,
+      "--bar", bar,
       "--limit", "299",
     ], { timeout: 10_000 });
 
@@ -231,7 +231,102 @@ function simulate(
 }
 
 // ---------------------------------------------------------------------------
-// Main
+// Library entry point — usable from the Telegram /backtest command.
+// Returns top N sorted results without printing or saving a CSV.
+// ---------------------------------------------------------------------------
+export interface RunBacktestOptions {
+  bar?: string;            // "1m" | "5m" | "15m" | "1H" | "4H" | "1D"   default "5m"
+  minCandles?: number;     // skip tokens with fewer candles. default 60
+  topN?: number;           // how many top results to return. default 10
+  armRange?: number[];
+  trailRange?: number[];
+  stopRange?: number[];
+  onProgress?: (stage: "fetching" | "simulating", pct: number) => void;
+}
+
+export interface RunBacktestResult {
+  samplesUsed: number;
+  tokensFetched: number;
+  allResults: GridResult[];     // full grid, sorted best→worst
+  topResults: GridResult[];     // top N slice for convenience
+  bar: string;
+  durationMs: number;
+}
+
+export async function runBacktest(opts: RunBacktestOptions = {}): Promise<RunBacktestResult> {
+  const bar = opts.bar ?? "5m";
+  const minCandles = opts.minCandles ?? 60;
+  const topN = opts.topN ?? 10;
+  const armRange   = opts.armRange ?? ARM_RANGE;
+  const trailRange = opts.trailRange ?? TRAIL_RANGE;
+  const stopRange  = opts.stopRange ?? STOP_RANGE;
+
+  const start = Date.now();
+
+  // 1. Fetch trending tokens
+  opts.onProgress?.("fetching", 0);
+  const tokens = await fetchTrendingTokens();
+
+  // 2. Fetch klines in parallel batches
+  const samples: Array<{ symbol: string; candles: Candle[] }> = [];
+  for (let i = 0; i < tokens.length; i += 5) {
+    const batch = tokens.slice(i, i + 5);
+    const results = await Promise.all(
+      batch.map(async t => ({ symbol: t.symbol, candles: await fetchKlines(t.address, bar) })),
+    );
+    for (const r of results) {
+      if (r.candles.length >= minCandles) samples.push(r);
+    }
+    opts.onProgress?.("fetching", Math.min(100, Math.round(((i + 5) / tokens.length) * 100)));
+    if (i + 5 < tokens.length) await new Promise(r => setTimeout(r, 400));
+  }
+
+  // 3. Build simple-strategy grid (ARM × TRAIL × STOP, no moonbag / no scaleout)
+  const combos: Array<{ arm: number; trail: number; stop: number }> = [];
+  for (const arm of armRange)
+    for (const trail of trailRange)
+      for (const stop of stopRange)
+        combos.push({ arm, trail, stop });
+
+  // 4. Simulate
+  const results: GridResult[] = [];
+  for (let i = 0; i < combos.length; i++) {
+    const combo = combos[i]!;
+    let totalPnlPct = 0, wins = 0, losses = 0, holding = 0;
+    for (const s of samples) {
+      const sim = simulate(s.candles, combo.arm, combo.trail, combo.stop);
+      totalPnlPct += sim.exitPct;
+      if (sim.reason === "holding") holding++;
+      else if (sim.exitPct >= 0) wins++;
+      else losses++;
+    }
+    results.push({
+      arm: combo.arm, trail: combo.trail, stop: combo.stop,
+      scaleoutPct: 0, scaleoutMult: 0, moonbagPct: 0, mbTrail: 0, mbTimeout: 0,
+      breakEvenAfter: 0, hardTPPct: 0,
+      totalPnlPct,
+      avgExitPct: samples.length > 0 ? totalPnlPct / samples.length : 0,
+      wins, losses, holding,
+      trades: samples.length,
+      tpHits: 0, beSaves: 0,
+    });
+    if (i % 5 === 0) opts.onProgress?.("simulating", Math.round((i / combos.length) * 100));
+  }
+
+  results.sort((a, b) => b.totalPnlPct - a.totalPnlPct);
+
+  return {
+    samplesUsed: samples.length,
+    tokensFetched: tokens.length,
+    allResults: results,
+    topResults: results.slice(0, topN),
+    bar,
+    durationMs: Date.now() - start,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Main (CLI entry — prints table + writes CSV)
 // ---------------------------------------------------------------------------
 async function main(): Promise<void> {
   console.log(`\n📊 memeautobuy backtest  |  bar: ${BAR}  |  min candles: ${MIN_CANDLES}`);
@@ -441,4 +536,9 @@ async function main(): Promise<void> {
   console.log(`  CSV saved -> ${csvFile}\n`);
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+// Only run main() when this file is invoked directly as a script (not when
+// imported as a library, e.g. by the /backtest Telegram command).
+import { fileURLToPath } from "node:url";
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  main().catch(e => { console.error(e); process.exit(1); });
+}
