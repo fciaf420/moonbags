@@ -203,16 +203,18 @@ export function notifyLlmPartial(args: {
   mint: string;
   sellPct: number;         // e.g. 0.30
   exitSol: number;         // SOL received on this partial sell
+  partialPnlSol: number;   // net SOL profit/loss on this partial sell
   partialPnlPct: number;   // PnL % on the piece that was sold
   currentPnlPct: number;   // current total PnL of remaining position (informational)
   reason: string;
   signature: string;
 }): Promise<void> {
   const partialSign = args.partialPnlPct >= 0 ? "+" : "";
+  const pnlSolSign = args.partialPnlSol >= 0 ? "+" : "";
   const currentSign = args.currentPnlPct >= 0 ? "+" : "";
   return send(
     `💰 <b>LLM partial ${escapeHtml(args.name)}</b>  sold ${(args.sellPct * 100).toFixed(0)}%\n` +
-    `Locked: <b>${partialSign}${args.partialPnlPct.toFixed(1)}%</b> (${args.exitSol.toFixed(4)} SOL)\n` +
+    `Locked: <b>${partialSign}${args.partialPnlPct.toFixed(1)}%</b> (${pnlSolSign}${args.partialPnlSol.toFixed(4)} SOL profit; ${args.exitSol.toFixed(4)} SOL received)\n` +
     `Remainder still open at ${currentSign}${args.currentPnlPct.toFixed(1)}%\n` +
     `<i>"${escapeHtml(args.reason)}"</i>\n` +
     `<a href="${gmgn(escapeHtml(args.mint))}">GMGN</a>  ·  <a href="${solscan(escapeHtml(args.signature))}">tx ${escapeHtml(short(args.signature))}</a>`,

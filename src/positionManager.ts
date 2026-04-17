@@ -42,6 +42,11 @@ export type ClosedTrade = {
   pnlPct: number;
   peakPnlPct: number;
   reason: string;
+  partialCount?: number;
+  partialEntrySol?: number;
+  partialExitSol?: number;
+  remainingEntrySol?: number;
+  remainingExitSol?: number;
   llmReason?: string;
   exitSig?: string;
 };
@@ -94,6 +99,43 @@ function deserializePos(raw: Record<string, unknown>): Position {
     tokensHeld: BigInt(String(raw.tokensHeld ?? "0")),
     originalTokensHeld: raw.originalTokensHeld ? BigInt(String(raw.originalTokensHeld)) : undefined,
   } as Position;
+}
+
+function getPartialExitAccounting(position: Position, remainingEntrySol: number): {
+  count: number;
+  entrySol: number;
+  exitSol: number;
+  pnlSol: number;
+} {
+  const partials = position.partialExits ?? [];
+  if (partials.length === 0) return { count: 0, entrySol: 0, exitSol: 0, pnlSol: 0 };
+
+  const exitSol = partials.reduce((sum, p) => sum + p.exitSol, 0);
+  const storedEntrySol = partials.reduce((sum, p) => sum + (p.entrySol ?? 0), 0);
+  const hasStoredBasis = partials.every((p) => typeof p.entrySol === "number" && Number.isFinite(p.entrySol));
+
+  if (hasStoredBasis) {
+    const pnlSol = partials.reduce((sum, p) => sum + (p.pnlSol ?? p.exitSol - (p.entrySol ?? 0)), 0);
+    return { count: partials.length, entrySol: storedEntrySol, exitSol, pnlSol };
+  }
+
+  // Back-compat for positions that were already partially sold before we
+  // started persisting tranche basis. Each sellPct is a fraction of the
+  // then-current remaining position, so reconstruct the original basis from
+  // the final remaining basis and walk the partials forward.
+  const remainingFraction = partials.reduce((product, p) => product * (1 - p.sellPct), 1);
+  if (remainingFraction <= 0 || !Number.isFinite(remainingFraction)) {
+    return { count: partials.length, entrySol: storedEntrySol, exitSol, pnlSol: exitSol - storedEntrySol };
+  }
+
+  let entryBefore = remainingEntrySol / remainingFraction;
+  let entrySol = 0;
+  for (const partial of partials) {
+    const allocatedEntry = entryBefore * partial.sellPct;
+    entrySol += allocatedEntry;
+    entryBefore -= allocatedEntry;
+  }
+  return { count: partials.length, entrySol, exitSol, pnlSol: exitSol - entrySol };
 }
 
 function markDirty(): void {
@@ -580,6 +622,17 @@ async function partialSellAndMoonbag(position: Position, reason: "trail"): Promi
   position.originalTokensHeld = position.originalTokensHeld ?? totalTokens;
   position.tokensHeld = moonbagTokens;
   position.entrySolSpent = moonbagEntry; // reduce entry basis so moonbag close has correct PnL
+  position.partialExits = position.partialExits ?? [];
+  position.partialExits.push({
+    at: Date.now(),
+    sellPct: sellFraction,
+    entrySol: allocatedEntry,
+    exitSol,
+    pnlSol: exitSol - allocatedEntry,
+    priceSol: position.currentPricePerTokenSol,
+    reason,
+    sig: sellResult.signature,
+  });
   position.moonbagMode = true;
   position.moonbagPeakPriceSol = position.currentPricePerTokenSol;
   position.moonbagStartedAt = Date.now();
@@ -704,7 +757,9 @@ async function partialSellPosition(
   position.partialExits.push({
     at: Date.now(),
     sellPct,
+    entrySol: allocatedEntry,
     exitSol,
+    pnlSol: exitSol - allocatedEntry,
     priceSol: position.currentPricePerTokenSol,
     reason,
     sig: sellResult.signature,
@@ -725,6 +780,7 @@ async function partialSellPosition(
     mint,
     sellPct,
     exitSol,
+    partialPnlSol: exitSol - allocatedEntry,
     partialPnlPct,
     currentPnlPct,
     reason,
@@ -798,6 +854,12 @@ async function closePosition(mint: string, reason: "trail" | "stop" | "timeout" 
   const pnlSolPct = entrySol > 0 ? (exitSol / entrySol - 1) * 100 : 0;
   realizedPnlSol += exitSol - entrySol;
 
+  const partials = getPartialExitAccounting(position, entrySol);
+  const cumulativeEntrySol = entrySol + partials.entrySol;
+  const cumulativeExitSol = exitSol + partials.exitSol;
+  const cumulativePnlSol = cumulativeExitSol - cumulativeEntrySol;
+  const cumulativePnlSolPct = cumulativeEntrySol > 0 ? (cumulativeExitSol / cumulativeEntrySol - 1) * 100 : 0;
+
   position.status = "closed";
   position.exitSig = sellResult.signature;
   position.exitReason = reason;
@@ -808,11 +870,23 @@ async function closePosition(mint: string, reason: "trail" | "stop" | "timeout" 
     : 0;
   const holdSecsLog = Math.floor((Date.now() - position.openedAt) / 1000);
 
-  logger.info({ mint, reason, entrySol, exitSol, pnlSolPct }, "position closed");
+  logger.info(
+    { mint, reason, entrySol, exitSol, pnlSolPct, partialCount: partials.count, cumulativeEntrySol, cumulativeExitSol, cumulativePnlSolPct },
+    "position closed",
+  );
   void appendClosedTrade({
     mint, name: position.name,
     closedAt: Date.now(), openedAt: position.openedAt, holdSecs: holdSecsLog,
-    entrySol, exitSol, pnlSol: exitSol - entrySol, pnlPct: pnlSolPct, peakPnlPct: peakPnlPctLog,
+    entrySol: cumulativeEntrySol,
+    exitSol: cumulativeExitSol,
+    pnlSol: cumulativePnlSol,
+    pnlPct: cumulativePnlSolPct,
+    peakPnlPct: peakPnlPctLog,
+    partialCount: partials.count || undefined,
+    partialEntrySol: partials.count ? partials.entrySol : undefined,
+    partialExitSol: partials.count ? partials.exitSol : undefined,
+    remainingEntrySol: partials.count ? entrySol : undefined,
+    remainingExitSol: partials.count ? exitSol : undefined,
     reason, llmReason: reason === "llm" ? position.lastLlmReason : undefined,
     exitSig: sellResult.signature,
   });
@@ -831,7 +905,7 @@ async function closePosition(mint: string, reason: "trail" | "stop" | "timeout" 
         entryPnlPct: 0,
         // Store PnL as a decimal (0.574 for +57.4%) — this is the scale the
         // verdict heuristic reasons about, not the whole-percent log value.
-        exitPnlPct: entrySol > 0 ? exitSol / entrySol - 1 : 0,
+        exitPnlPct: cumulativeEntrySol > 0 ? cumulativeExitSol / cumulativeEntrySol - 1 : 0,
         peakPnlPct: position.entryPricePerTokenSol > 0
           ? position.peakPricePerTokenSol / position.entryPricePerTokenSol - 1
           : 0,
@@ -847,9 +921,9 @@ async function closePosition(mint: string, reason: "trail" | "stop" | "timeout" 
     name: position.name,
     mint,
     reason,
-    entrySol,
-    exitSol,
-    pnlSolPct,
+    entrySol: cumulativeEntrySol,
+    exitSol: cumulativeExitSol,
+    pnlSolPct: cumulativePnlSolPct,
     peakPnlPct: peakPnlPctLog,
     holdSecs: holdSecsLog,
     signature: sellResult.signature ?? "",

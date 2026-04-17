@@ -68,7 +68,9 @@ export interface Position {
   partialExits?: Array<{
     at: number;           // timestamp ms
     sellPct: number;      // fraction of then-current tokensHeld that was sold
+    entrySol?: number;    // proportional entry basis assigned to the sold piece
     exitSol: number;      // SOL received from this partial sell
+    pnlSol?: number;      // net SOL profit/loss from the sold piece
     priceSol: number;     // token price in SOL at time of sell
     reason: string;       // LLM's reason
     sig?: string;         // tx signature
