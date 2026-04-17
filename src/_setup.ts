@@ -349,7 +349,7 @@ async function main(): Promise<void> {
 
   // 8. Trading params
   section("Trading parameters", 8);
-  console.log(gray("   Defaults are backtest-optimized against 100 trending Solana tokens."));
+  console.log(gray("   Defaults are backtest-optimized against ~100 hot-token Solana candidates."));
   console.log(gray("   Press Enter to accept each, or type a new value."));
   console.log(gray("   You can change any of these live via /settings in Telegram."));
   console.log("");

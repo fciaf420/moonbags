@@ -101,6 +101,9 @@ const SETTINGS_LABELS: Record<SettableKey, string> = {
   LLM_EXIT_ENABLED:         "🧠 LLM advisor",
   MILESTONES_ENABLED:       "🎯 Milestones",
   MILESTONE_PCTS:           "🎯 Milestone %s",
+  MOONBAG_PCT:              "🌙 Moonbag keep %",
+  MB_TRAIL_PCT:             "🌙 Moonbag trail",
+  MB_TIMEOUT_SECS:          "🌙 Moonbag timeout",
 };
 
 async function sendSettingsMenu(chatId: number): Promise<void> {
@@ -622,7 +625,7 @@ function formatSetupStatusHtml(report: DoctorReport): string {
     "env:okx",
     "env:telegram",
     "onchainos:version",
-    "onchainos:trending",
+    "onchainos:hot-tokens",
     "pm2",
     "pm2:moonbags",
   ]);
@@ -660,13 +663,16 @@ async function handleSetupStatus(chatId: number): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// /backtest — run a backtest on 100 trending Solana tokens, present top 5
+// /backtest — run a backtest on ~100 hot-token Solana candidates, present top 5
 // combos vs the user's current config, and let them adopt any row with a
 // tap (writes live to .env via setConfigValue, no restart needed).
 // ---------------------------------------------------------------------------
 let backtestInFlight = false;
 
-async function handleBacktest(chatId: number): Promise<void> {
+async function handleBacktest(chatId: number, argText: string = ""): Promise<void> {
+  // `/backtest hybrid` grids over moonbag params additionally.
+  const mode: "simple" | "hybrid" = argText.trim().toLowerCase() === "hybrid" ? "hybrid" : "simple";
+
   if (backtestInFlight) {
     await tgPost("sendMessage", {
       chat_id: chatId,
@@ -677,12 +683,19 @@ async function handleBacktest(chatId: number): Promise<void> {
   backtestInFlight = true;
 
   // Status message we'll update as progress happens
+  const llmWarning = CONFIG.LLM_EXIT_ENABLED
+    ? "\n⚠️ <b>LLM exit advisor is ON.</b> This backtest models static-trail mode only — " +
+      (mode === "hybrid"
+        ? "MOONBAG params would only fire with LLM off."
+        : "adopted ARM/TRAIL/STOP become ceilings the LLM can tighten against.")
+    : "";
   const startMsg = await tgPost("sendMessage", {
     chat_id: chatId,
     text:
-      "🧪 <b>Running backtest...</b>\n" +
-      "<i>Fetching top 100 trending Solana tokens + 5m klines...\n" +
-      "This takes ~60 seconds.</i>",
+      `🧪 <b>Running ${mode === "hybrid" ? "hybrid" : "simple"} backtest...</b>\n` +
+      `<i>Fetching ~100 hot-tokens on Solana + 5m klines. Entry = oldest candle per token (no filter — mirrors bot receiving alert).\n` +
+      `This takes ~60 seconds.</i>` +
+      llmWarning,
     parse_mode: "HTML",
   }) as { result?: { message_id?: number } };
   const statusId = startMsg?.result?.message_id;
@@ -692,6 +705,7 @@ async function handleBacktest(chatId: number): Promise<void> {
       bar: "5m",
       topN: 5,
       minCandles: 60,
+      hybrid: mode === "hybrid",
     });
 
     if (!topResults.length) {
@@ -702,25 +716,55 @@ async function handleBacktest(chatId: number): Promise<void> {
       return;
     }
 
-    // Where does the CURRENT config rank?
+    // Where does the CURRENT config rank? For hybrid we also match on moonbag params.
     const curArm = CONFIG.ARM_PCT;
     const curTrail = CONFIG.TRAIL_PCT;
     const curStop = CONFIG.STOP_PCT;
+    const curMb = CONFIG.MOONBAG_PCT;
+    const curMbTrail = CONFIG.MB_TRAIL_PCT;
+    const curMbTimeoutMin = CONFIG.MB_TIMEOUT_SECS / 60;
     const curIdx = allResults.findIndex(
-      (r) => Math.abs(r.arm - curArm) < 0.001 && Math.abs(r.trail - curTrail) < 0.001 && Math.abs(r.stop - curStop) < 0.001,
+      (r) =>
+        Math.abs(r.arm - curArm) < 0.001 &&
+        Math.abs(r.trail - curTrail) < 0.001 &&
+        Math.abs(r.stop - curStop) < 0.001 &&
+        (mode === "simple" ||
+          (Math.abs(r.moonbagPct - curMb) < 0.001 &&
+           Math.abs(r.mbTrail - curMbTrail) < 0.001 &&
+           Math.abs(r.mbTimeout - curMbTimeoutMin) < 0.01)),
     );
     const curRow = curIdx >= 0 ? allResults[curIdx] : null;
 
+    // Compact formatting for hybrid rows (extra params)
+    const fmtCombo = (r: typeof allResults[number]): string => {
+      const base = `ARM ${(r.arm*100).toFixed(0)}% / TRAIL ${(r.trail*100).toFixed(0)}% / STOP ${(r.stop*100).toFixed(0)}%`;
+      if (mode !== "hybrid") return base;
+      if (r.moonbagPct === 0) return `${base} · MB off`;
+      return `${base} · MB ${(r.moonbagPct*100).toFixed(0)}% @trail ${(r.mbTrail*100).toFixed(0)}% (${r.mbTimeout}m)`;
+    };
+    const fmtComboBtn = (r: typeof allResults[number]): string => {
+      const base = `ARM ${(r.arm*100).toFixed(0)} TRAIL ${(r.trail*100).toFixed(0)} STOP ${(r.stop*100).toFixed(0)}`;
+      if (mode !== "hybrid") return base;
+      if (r.moonbagPct === 0) return `${base} MB off`;
+      return `${base} MB ${(r.moonbagPct*100).toFixed(0)}%`;
+    };
+
     // Build message
     const lines: string[] = [];
-    lines.push(`🧪 <b>Backtest complete</b>`);
-    lines.push(`<i>${samplesUsed}/${tokensFetched} tokens · ${allResults.length} combos · ${Math.round(durationMs/1000)}s</i>`);
+    lines.push(`🧪 <b>Backtest complete</b> (${mode})`);
+    lines.push(`<i>${samplesUsed}/${tokensFetched} tokens · ${allResults.length} combos · ${Math.round(durationMs/1000)}s · 5m bars · entry at oldest candle</i>`);
     lines.push("");
+    if (CONFIG.LLM_EXIT_ENABLED) {
+      lines.push(`⚠️ <b>LLM is ON</b> — ${mode === "hybrid"
+        ? "MOONBAG params only take effect with LLM off."
+        : "adopted params are ceilings the LLM can tighten against."}`);
+      lines.push("");
+    }
 
     if (curRow) {
       const curWinPct = (curRow.wins / (curRow.wins + curRow.losses || 1)) * 100;
       const rank = curIdx + 1;
-      lines.push(`<b>Your current:</b>  ARM ${(curArm*100).toFixed(0)}% / TRAIL ${(curTrail*100).toFixed(0)}% / STOP ${(curStop*100).toFixed(0)}%`);
+      lines.push(`<b>Your current:</b>  ${fmtCombo(curRow)}`);
       lines.push(`   +${curRow.totalPnlPct.toFixed(0)}%  ·  avg +${curRow.avgExitPct.toFixed(0)}%/trade  ·  ${curRow.wins}W/${curRow.losses}L/${curRow.holding}H  ·  ${curWinPct.toFixed(0)}% win  ·  <b>rank #${rank}/${allResults.length}</b>`);
     } else {
       lines.push(`<b>Your current</b> (ARM ${(curArm*100).toFixed(0)}% / TRAIL ${(curTrail*100).toFixed(0)}% / STOP ${(curStop*100).toFixed(0)}%) isn't in the test grid.`);
@@ -734,18 +778,22 @@ async function handleBacktest(chatId: number): Promise<void> {
       const isCurrent = curIdx === i;
       const marker = isCurrent ? " ← your current" : "";
       lines.push(
-        `<b>#${i+1}</b>  ARM ${(r.arm*100).toFixed(0)}% / TRAIL ${(r.trail*100).toFixed(0)}% / STOP ${(r.stop*100).toFixed(0)}%${marker}\n` +
+        `<b>#${i+1}</b>  ${fmtCombo(r)}${marker}\n` +
         `   +${r.totalPnlPct.toFixed(0)}%  ·  avg +${r.avgExitPct.toFixed(0)}%/trade  ·  ${r.wins}W/${r.losses}L/${r.holding}H  ·  ${winPct.toFixed(0)}% win`,
       );
     }
     lines.push("");
     lines.push(`<i>Tap a row to adopt (applies live, no restart needed).</i>`);
 
-    // Buttons — one per top result + a cancel
-    const buttons = topResults.map((r, i): [{ text: string; callback_data: string }] => ([{
-      text: `Adopt #${i+1}: ARM ${(r.arm*100).toFixed(0)}% TRAIL ${(r.trail*100).toFixed(0)}% STOP ${(r.stop*100).toFixed(0)}%`,
-      callback_data: `adopt:${r.arm.toFixed(2)}:${r.trail.toFixed(2)}:${r.stop.toFixed(2)}`,
-    }]));
+    // Buttons — callback_data carries mode + params so adopt handler knows what to write.
+    // simple  → adopt:simple:arm:trail:stop
+    // hybrid  → adopt:hybrid:arm:trail:stop:mbPct:mbTrail:mbTimeoutMin
+    const buttons = topResults.map((r, i): [{ text: string; callback_data: string }] => {
+      const data = mode === "hybrid"
+        ? `adopt:hybrid:${r.arm.toFixed(2)}:${r.trail.toFixed(2)}:${r.stop.toFixed(2)}:${r.moonbagPct.toFixed(2)}:${r.mbTrail.toFixed(2)}:${r.mbTimeout}`
+        : `adopt:simple:${r.arm.toFixed(2)}:${r.trail.toFixed(2)}:${r.stop.toFixed(2)}`;
+      return [{ text: `Adopt #${i+1}: ${fmtComboBtn(r)}`, callback_data: data }];
+    });
     buttons.push([{ text: "❌ Cancel", callback_data: "adopt:cancel" }]);
 
     // Replace the status message with final result
@@ -918,16 +966,20 @@ async function handleUpdateConfirmed(chatId: number): Promise<void> {
 // First-tap handler — does NOT apply. Shows a side-by-side diff vs current
 // settings and asks for explicit confirmation. The confirm tap uses the
 // callback_data prefix `confirm-adopt:` to route to the actual apply path.
+// Formats:
+//   adopt:cancel
+//   adopt:simple:arm:trail:stop
+//   adopt:hybrid:arm:trail:stop:mbPct:mbTrail:mbTimeoutMin
 async function handleAdopt(chatId: number, data: string): Promise<void> {
-  // data = "adopt:arm:trail:stop" or "adopt:cancel"
   const parts = data.split(":");
   if (parts[1] === "cancel") {
     await tgPost("sendMessage", { chat_id: chatId, text: "❌ Cancelled. Config unchanged." });
     return;
   }
-  const arm = parts[1];
-  const trail = parts[2];
-  const stop = parts[3];
+  const mode = parts[1] === "hybrid" ? "hybrid" : "simple";
+  const arm   = parts[2];
+  const trail = parts[3];
+  const stop  = parts[4];
   if (!arm || !trail || !stop) {
     await tgPost("sendMessage", { chat_id: chatId, text: "⚠️ Malformed adopt data." });
     return;
@@ -941,29 +993,70 @@ async function handleAdopt(chatId: number, data: string): Promise<void> {
   const curStop = CONFIG.STOP_PCT;
 
   // Build a side-by-side diff so the user sees exactly what will change.
-  const diffRow = (label: string, cur: number, next: number): string => {
+  const diffRowPct = (label: string, cur: number, next: number): string => {
     const unchanged = Math.abs(cur - next) < 0.001;
     if (unchanged) {
-      return `${label.padEnd(6)}${(cur * 100).toFixed(0)}%  (unchanged)`;
+      return `${label.padEnd(8)}${(cur * 100).toFixed(0)}%  (unchanged)`;
     }
     const delta = (next - cur) * 100;
     const arrow = delta >= 0 ? "↑" : "↓";
     const sign = delta >= 0 ? "+" : "";
-    return `${label.padEnd(6)}${(cur * 100).toFixed(0)}% → <b>${(next * 100).toFixed(0)}%</b>  ${arrow} ${sign}${delta.toFixed(0)}%`;
+    return `${label.padEnd(8)}${(cur * 100).toFixed(0)}% → <b>${(next * 100).toFixed(0)}%</b>  ${arrow} ${sign}${delta.toFixed(0)}%`;
   };
+  const diffRowMin = (label: string, curMin: number, nextMin: number): string => {
+    const unchanged = Math.abs(curMin - nextMin) < 0.01;
+    if (unchanged) return `${label.padEnd(8)}${Math.round(curMin)}m  (unchanged)`;
+    const delta = nextMin - curMin;
+    const arrow = delta >= 0 ? "↑" : "↓";
+    const sign = delta >= 0 ? "+" : "";
+    return `${label.padEnd(8)}${Math.round(curMin)}m → <b>${Math.round(nextMin)}m</b>  ${arrow} ${sign}${Math.round(delta)}m`;
+  };
+
+  const diffLines = [
+    diffRowPct("ARM:", curArm, newArm),
+    diffRowPct("TRAIL:", curTrail, newTrail),
+    diffRowPct("STOP:", curStop, newStop),
+  ];
+
+  let hybridExtra = "";
+  if (mode === "hybrid") {
+    const mbPct        = parts[5];
+    const mbTrail      = parts[6];
+    const mbTimeoutMin = parts[7];
+    if (!mbPct || !mbTrail || !mbTimeoutMin) {
+      await tgPost("sendMessage", { chat_id: chatId, text: "⚠️ Malformed hybrid adopt data." });
+      return;
+    }
+    const newMb = parseFloat(mbPct);
+    const newMbTrail = parseFloat(mbTrail);
+    const newMbTimeoutMin = parseFloat(mbTimeoutMin);
+    const curMb = CONFIG.MOONBAG_PCT;
+    const curMbTrail = CONFIG.MB_TRAIL_PCT;
+    const curMbTimeoutMin = CONFIG.MB_TIMEOUT_SECS / 60;
+    diffLines.push(diffRowPct("MB:", curMb, newMb));
+    diffLines.push(diffRowPct("MBTRAIL:", curMbTrail, newMbTrail));
+    diffLines.push(diffRowMin("MBTIME:", curMbTimeoutMin, newMbTimeoutMin));
+    if (CONFIG.LLM_EXIT_ENABLED) {
+      hybridExtra = "\n⚠️ <b>LLM_EXIT_ENABLED is ON</b> — MOONBAG params will NOT take effect. Partial exits are LLM-driven.\nSet LLM_EXIT_ENABLED=false in /settings for these to fire.";
+    }
+  }
+
+  // Confirm callback_data preserves mode + params
+  const confirmData = mode === "hybrid"
+    ? `confirm-adopt:hybrid:${arm}:${trail}:${stop}:${parts[5]}:${parts[6]}:${parts[7]}`
+    : `confirm-adopt:simple:${arm}:${trail}:${stop}`;
 
   await tgPost("sendMessage", {
     chat_id: chatId,
     text:
-      `⚠️ <b>Confirm adopt?</b>\n\n` +
-      `<pre>${escapeHtml(diffRow("ARM:", curArm, newArm))}\n` +
-      `${escapeHtml(diffRow("TRAIL:", curTrail, newTrail))}\n` +
-      `${escapeHtml(diffRow("STOP:", curStop, newStop))}</pre>\n` +
-      `Applies live, writes to .env. No restart needed.`,
+      `⚠️ <b>Confirm adopt? (${mode})</b>\n\n` +
+      `<pre>${diffLines.map(l => escapeHtml(l)).join("\n")}</pre>\n` +
+      `Applies live, writes to .env. No restart needed.` +
+      hybridExtra,
     parse_mode: "HTML",
     reply_markup: {
       inline_keyboard: [
-        [{ text: "✅ Yes, adopt", callback_data: `confirm-adopt:${arm}:${trail}:${stop}` }],
+        [{ text: "✅ Yes, adopt", callback_data: confirmData }],
         [{ text: "❌ Cancel", callback_data: "adopt:cancel" }],
       ],
     },
@@ -971,27 +1064,43 @@ async function handleAdopt(chatId: number, data: string): Promise<void> {
 }
 
 // Confirm tap — actually applies the settings. Fires setConfigValue for
-// each of ARM_PCT / TRAIL_PCT / STOP_PCT in sequence; partial failure is
-// surfaced per-field.
+// each of ARM_PCT / TRAIL_PCT / STOP_PCT (+ moonbag in hybrid) in sequence;
+// partial failure is surfaced per-field.
 async function handleAdoptConfirmed(chatId: number, data: string): Promise<void> {
-  // data = "confirm-adopt:arm:trail:stop"
+  // data = "confirm-adopt:simple:arm:trail:stop"
+  //      | "confirm-adopt:hybrid:arm:trail:stop:mbPct:mbTrail:mbTimeoutMin"
   const parts = data.split(":");
-  const arm = parts[1];
-  const trail = parts[2];
-  const stop = parts[3];
+  const mode = parts[1] === "hybrid" ? "hybrid" : "simple";
+  const arm   = parts[2];
+  const trail = parts[3];
+  const stop  = parts[4];
   if (!arm || !trail || !stop) {
     await tgPost("sendMessage", { chat_id: chatId, text: "⚠️ Malformed confirm-adopt data." });
     return;
   }
 
-  // Apply each via setConfigValue — live, persists to .env
-  const results = [
-    { key: "ARM_PCT" as const, value: arm, result: setConfigValue("ARM_PCT", arm) },
-    { key: "TRAIL_PCT" as const, value: trail, result: setConfigValue("TRAIL_PCT", trail) },
-    { key: "STOP_PCT" as const, value: stop, result: setConfigValue("STOP_PCT", stop) },
+  type SetEntry = { key: SettableKey; value: string; result: ReturnType<typeof setConfigValue> };
+  const results: SetEntry[] = [
+    { key: "ARM_PCT", value: arm, result: setConfigValue("ARM_PCT", arm) },
+    { key: "TRAIL_PCT", value: trail, result: setConfigValue("TRAIL_PCT", trail) },
+    { key: "STOP_PCT", value: stop, result: setConfigValue("STOP_PCT", stop) },
   ];
-  const failures = results.filter(r => !r.result.ok);
 
+  if (mode === "hybrid") {
+    const mbPct = parts[5];
+    const mbTrail = parts[6];
+    const mbTimeoutMin = parts[7];
+    if (!mbPct || !mbTrail || !mbTimeoutMin) {
+      await tgPost("sendMessage", { chat_id: chatId, text: "⚠️ Malformed hybrid confirm-adopt data." });
+      return;
+    }
+    const mbSecs = String(Math.round(parseFloat(mbTimeoutMin) * 60));
+    results.push({ key: "MOONBAG_PCT", value: mbPct, result: setConfigValue("MOONBAG_PCT", mbPct) });
+    results.push({ key: "MB_TRAIL_PCT", value: mbTrail, result: setConfigValue("MB_TRAIL_PCT", mbTrail) });
+    results.push({ key: "MB_TIMEOUT_SECS", value: mbSecs, result: setConfigValue("MB_TIMEOUT_SECS", mbSecs) });
+  }
+
+  const failures = results.filter(r => !r.result.ok);
   if (failures.length > 0) {
     await tgPost("sendMessage", {
       chat_id: chatId,
@@ -1000,15 +1109,28 @@ async function handleAdoptConfirmed(chatId: number, data: string): Promise<void>
     return;
   }
 
-  logger.info({ arm, trail, stop }, "[telegram] backtest config adopted");
+  logger.info({ mode, arm, trail, stop, extra: mode === "hybrid" ? { mb: parts[5], mbTrail: parts[6], mbTimeoutMin: parts[7] } : undefined }, "[telegram] backtest config adopted");
+
+  const summary = [
+    `ARM: ${(parseFloat(arm)*100).toFixed(0)}%`,
+    `TRAIL: ${(parseFloat(trail)*100).toFixed(0)}%`,
+    `STOP: ${(parseFloat(stop)*100).toFixed(0)}%`,
+  ];
+  if (mode === "hybrid") {
+    summary.push(`MOONBAG: ${(parseFloat(parts[5]!)*100).toFixed(0)}%`);
+    summary.push(`MB_TRAIL: ${(parseFloat(parts[6]!)*100).toFixed(0)}%`);
+    summary.push(`MB_TIMEOUT: ${Math.round(parseFloat(parts[7]!))}m`);
+  }
+  const llmWarning = mode === "hybrid" && CONFIG.LLM_EXIT_ENABLED
+    ? "\n\n⚠️ <b>Reminder:</b> LLM is ON — MOONBAG params saved to .env but won't fire until you set LLM_EXIT_ENABLED=false."
+    : "";
   await tgPost("sendMessage", {
     chat_id: chatId,
     text:
-      `✅ <b>Adopted new config</b>\n` +
-      `ARM: ${(parseFloat(arm)*100).toFixed(0)}%\n` +
-      `TRAIL: ${(parseFloat(trail)*100).toFixed(0)}%\n` +
-      `STOP: ${(parseFloat(stop)*100).toFixed(0)}%\n\n` +
-      `<i>Saved to .env and active on next tick. No restart needed.</i>`,
+      `✅ <b>Adopted new config (${mode})</b>\n` +
+      summary.join("\n") + "\n\n" +
+      `<i>Saved to .env and active on next tick. No restart needed.</i>` +
+      llmWarning,
     parse_mode: "HTML",
   });
 }
@@ -1038,7 +1160,7 @@ export function startTelegramBot(): () => void {
       { command: "skip",      description: "Blacklist a mint (or list/clear)" },
       { command: "mint",      description: "On-demand on-chain snapshot of any token" },
       { command: "wallet",    description: "Show wallet address + SOL balance" },
-      { command: "backtest",  description: "Run backtest + adopt optimal ARM/TRAIL/STOP live" },
+      { command: "backtest",  description: "Run backtest + adopt live (add 'hybrid' for moonbag grid)" },
       { command: "doctor",    description: "Run setup and runtime health checks" },
       { command: "setup_status", description: "Show setup checklist" },
       { command: "update",    description: "Pull latest code and restart via pm2" },
@@ -1111,7 +1233,7 @@ export function startTelegramBot(): () => void {
               case "/skip":      await handleSkip(chatId, argText); break;
               case "/mint":      await handleMint(chatId, argText); break;
               case "/wallet":    await handleWallet(chatId); break;
-              case "/backtest":  await handleBacktest(chatId); break;
+              case "/backtest":  await handleBacktest(chatId, argText); break;
               case "/doctor":    await handleDoctor(chatId); break;
               case "/setup_status": await handleSetupStatus(chatId); break;
               case "/update":    await handleUpdate(chatId); break;

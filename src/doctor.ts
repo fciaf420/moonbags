@@ -216,13 +216,15 @@ export async function runDoctor(options: { network?: boolean } = {}): Promise<Do
     fix: onchainos.ok ? undefined : "Run npm run install:onchainos, then export PATH=\"$HOME/.local/bin:$PATH\".",
   });
 
-  const trending = await run("onchainos", ["token", "trending", "--help"]);
+  // Hot-tokens discovery — `token trending` was removed in onchainos v2.3.0,
+  // so we only check hot-tokens now (which is what the backtester uses).
+  const hotTokens = await run("onchainos", ["token", "hot-tokens", "--help"]);
   checks.push({
-    id: "onchainos:trending",
-    label: "OnchainOS token trending",
-    status: trending.ok ? "ok" : "fail",
-    detail: trending.ok ? "available" : firstLine(trending.stderr || trending.stdout || (trending.error ?? "failed")),
-    fix: trending.ok ? undefined : "Run npm run install:onchainos, open a new terminal, then verify onchainos token trending --help.",
+    id: "onchainos:hot-tokens",
+    label: "OnchainOS hot-tokens",
+    status: hotTokens.ok ? "ok" : "fail",
+    detail: hotTokens.ok ? "available" : firstLine(hotTokens.stderr || hotTokens.stdout || (hotTokens.error ?? "failed")),
+    fix: hotTokens.ok ? undefined : "Run npm run install:onchainos, open a new terminal, then verify onchainos token hot-tokens --help.",
   });
 
   const pm2 = await run("pm2", ["--version"]);

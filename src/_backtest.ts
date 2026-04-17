@@ -1,5 +1,5 @@
 /**
- * Backtest: optimize exit strategy using OKX trending tokens.
+ * Backtest: optimize exit strategy using OKX hot-tokens list.
  *
  * Usage:
  *   npx tsx src/_backtest.ts                         # simple trail grid (default)
@@ -58,7 +58,7 @@ const BAR_MS: Record<string, number> = {
 // Types
 // ---------------------------------------------------------------------------
 interface Candle { ts: number; open: number; high: number; low: number; close: number }
-interface SimResult { exitPct: number; reason: "trail" | "stop" | "tp" | "holding" }
+interface SimResult { exitPct: number; reason: "trail" | "stop" | "tp" | "holding" | "no_entry" }
 interface TokenSample { address: string; symbol: string }
 interface GridResult {
   arm: number; trail: number; stop: number;
@@ -66,7 +66,7 @@ interface GridResult {
   mbTrail: number; mbTimeout: number;
   breakEvenAfter: number; hardTPPct: number;
   totalPnlPct: number; avgExitPct: number;
-  wins: number; losses: number; holding: number; trades: number;
+  wins: number; losses: number; holding: number; noEntry: number; trades: number;
   tpHits: number;       // how many trades exited via hard TP
   beSaves: number;      // how many trades exited via break-even stop (saved from loss)
 }
@@ -119,50 +119,33 @@ async function runOnchainosJson<T>(args: string[], timeout: number): Promise<T> 
 }
 
 // ---------------------------------------------------------------------------
-// Fetch top 100 trending Solana tokens (sorted by 24h volume)
+// Fetch top 100 hot Solana tokens (sorted by 24h volume). Uses onchainos'
+// `token hot-tokens` endpoint — the old `token trending` subcommand was
+// removed in onchainos v2.3.0, so we rely exclusively on hot-tokens now.
 // ---------------------------------------------------------------------------
-async function fetchTrendingTokens(): Promise<TokenSample[]> {
+async function fetchHotTokens(): Promise<TokenSample[]> {
   type RawToken = { tokenContractAddress: string; tokenSymbol: string };
-  const attempts: Array<{ label: string; args: string[] }> = [
-    {
-      label: "token trending",
-      args: [
-        "token", "trending",
-        "--chain", "solana",
-        "--sort-by", "5",      // volume
-        "--time-frame", "4",   // 24h
-      ],
-    },
-    {
-      label: "token hot-tokens",
-      args: [
-        "token", "hot-tokens",
-        "--chain", "solana",
-        "--rank-by", "5",      // volume
-        "--time-frame", "4",   // 24h
-      ],
-    },
+  const args = [
+    "token", "hot-tokens",
+    "--chain", "solana",
+    "--rank-by", "5",      // volume
+    "--time-frame", "4",   // 24h
+    "--limit", "100",      // max allowed (default was 20)
   ];
 
-  const errors: string[] = [];
-  for (const attempt of attempts) {
-    try {
-      const rows = await runOnchainosJson<RawToken[]>(attempt.args, 15_000);
-      const tokens = (rows ?? [])
-        .map(t => ({ address: t.tokenContractAddress, symbol: t.tokenSymbol }))
-        .filter(t => t.address && t.symbol);
-      if (tokens.length > 0) return tokens;
-      errors.push(`${attempt.label}: returned no tokens`);
-    } catch (err) {
-      errors.push(`${attempt.label}: ${(err as Error).message}`);
-    }
+  try {
+    const rows = await runOnchainosJson<RawToken[]>(args, 15_000);
+    const tokens = (rows ?? [])
+      .map(t => ({ address: t.tokenContractAddress, symbol: t.tokenSymbol }))
+      .filter(t => t.address && t.symbol);
+    if (tokens.length > 0) return tokens;
+    throw new Error("hot-tokens returned no tokens");
+  } catch (err) {
+    throw new Error(
+      "Unable to fetch OKX hot-tokens list. Update onchainos with `npm run install:onchainos`, " +
+      `then verify \`onchainos token hot-tokens --help\`. Cause: ${(err as Error).message}`,
+    );
   }
-
-  throw new Error(
-    "Unable to fetch OKX token list. Update onchainos with `npm run install:onchainos`, " +
-    "then verify `onchainos token trending --help`. " +
-    `Attempts: ${errors.join(" || ")}`,
-  );
 }
 
 // ---------------------------------------------------------------------------
@@ -199,6 +182,15 @@ async function fetchKlines(address: string, bar: string = BAR): Promise<Candle[]
 // Simulate one trade with given params.
 // Entry = first candle open. Supports partial scale-out and moonbag.
 // ---------------------------------------------------------------------------
+// NOTE on entry timing:
+//   We don't replicate SCG's upstream filter (we don't know exactly what it is),
+//   so we take all hot-tokens and enter each one at the oldest candle in the fetched
+//   window. This simulates "bot received some signal and entered; test forward from
+//   there." The hot-tokens bias (they already pumped) cuts the other way — if the
+//   bot had received an alert 25h ago it would have been at the start of the pump.
+//   Rankings are differentiated by the exit math (trigger-price exits) and by
+//   excluding mark-to-market holdings from the PnL total.
+
 function simulate(
   candles: Candle[],
   arm: number, trail: number, stop: number,
@@ -208,9 +200,9 @@ function simulate(
   hardTPPct = 0,        // if > 0, sell everything at the TP level (1+hardTPPct)
 ): SimResult {
   const firstCandle = candles[0];
-  if (!firstCandle) return { exitPct: 0, reason: "holding" };
+  if (!firstCandle) return { exitPct: 0, reason: "no_entry" };
   const rawEntry = firstCandle.open;
-  if (!rawEntry || rawEntry <= 0) return { exitPct: 0, reason: "holding" };
+  if (!rawEntry || rawEntry <= 0) return { exitPct: 0, reason: "no_entry" };
 
   // Apply fee + slippage haircut: each swap costs (FEE_BPS + SLIPPAGE_BPS)/10000
   // Effective entry price = raw * (1 + haircut), every sell price * (1 - haircut)
@@ -273,29 +265,34 @@ function simulate(
       continue;
     }
 
-    // stop loss — if break-even armed, the floor becomes entry (0% PnL)
-    // instead of -stop; otherwise regular hard stop.
+    // stop loss — live bot sells the moment price crosses entry×(1-stop).
+    // If break-even armed, the floor is entry itself (0% PnL).
     const stopFloor = breakEvenArmed ? 0 : -stop;
-    if ((c.low / decEntry - 1) <= stopFloor) {
-      // On break-even stop, model the exit at the entry price (haircut-adjusted)
-      // so the PnL is a clean ~-haircut%, not wherever the candle closed.
-      const exitPrice = breakEvenArmed ? decEntry : c.close;
-      realizedPnl += position * (adjSell(exitPrice) / entry - 1);
+    const stopPrice = breakEvenArmed ? decEntry : decEntry * (1 + stopFloor);
+    if (c.low <= stopPrice) {
+      // Exit AT the trigger price, not at c.close. This mirrors the live bot
+      // which sells the instant the level is crossed (2s polling).
+      realizedPnl += position * (adjSell(stopPrice) / entry - 1);
       return { exitPct: realizedPnl * 100, reason: "stop" };
     }
 
-    // trailing stop — only when armed
-    if (armed && c.low <= runPeak * (1 - trail)) {
-      if (moonbagPct > 0 && position > moonbagPct) {
-        const trailSellPct = position - moonbagPct;
-        realizedPnl += trailSellPct * (adjSell(c.close) / entry - 1);
-        position = moonbagPct;
-        moonbagMode = true;
-        mbPeak = c.close;
-        mbStartTs = c.ts;
-      } else {
-        realizedPnl += position * (adjSell(c.close) / entry - 1);
-        return { exitPct: realizedPnl * 100, reason: "trail" };
+    // trailing stop — live bot sells the moment drawdown from peak ≥ trail%,
+    // i.e. the moment price crosses peak × (1 - trail). Exit AT that level,
+    // not at c.close, so different trails produce different exits.
+    if (armed) {
+      const trailPrice = runPeak * (1 - trail);
+      if (c.low <= trailPrice) {
+        if (moonbagPct > 0 && position > moonbagPct) {
+          const trailSellPct = position - moonbagPct;
+          realizedPnl += trailSellPct * (adjSell(trailPrice) / entry - 1);
+          position = moonbagPct;
+          moonbagMode = true;
+          mbPeak = trailPrice;
+          mbStartTs = c.ts;
+        } else {
+          realizedPnl += position * (adjSell(trailPrice) / entry - 1);
+          return { exitPct: realizedPnl * 100, reason: "trail" };
+        }
       }
     }
   }
@@ -311,12 +308,19 @@ function simulate(
 // Returns top N sorted results without printing or saving a CSV.
 // ---------------------------------------------------------------------------
 export interface RunBacktestOptions {
-  bar?: string;            // "1m" | "5m" | "15m" | "1H" | "4H" | "1D"   default "5m"
+  bar?: string;            // "1m" | "5m" | "15m" | "1H" | "4H" | "1D"   default "1m"
   minCandles?: number;     // skip tokens with fewer candles. default 60
   topN?: number;           // how many top results to return. default 10
   armRange?: number[];
   trailRange?: number[];
   stopRange?: number[];
+  // Hybrid mode: additionally grid over moonbag params (partial kept after trail fires).
+  // Scale-out is deliberately NOT included — the live bot has no scale-out feature,
+  // so grading it would produce unusable adoptable params.
+  hybrid?: boolean;
+  moonbagRange?: number[];    // fraction kept after trail (0 = disabled). default [0, 0.10, 0.20]
+  mbTrailRange?: number[];    // moonbag's own drawdown trail. default [0.50, 0.60, 0.70]
+  mbTimeoutRange?: number[];  // moonbag max hold, minutes. default [30, 60, 120]
   onProgress?: (stage: "fetching" | "simulating", pct: number) => void;
 }
 
@@ -330,6 +334,12 @@ export interface RunBacktestResult {
 }
 
 export async function runBacktest(opts: RunBacktestOptions = {}): Promise<RunBacktestResult> {
+  // Default to 5m bars — at OKX's 299-candle cap, 5m = ~25h of forward runway per
+  // token. 1m gives tighter exit fidelity but only 5h of runway, which leaves
+  // most hot-tokens in "holding" state (not enough time to trigger trail/stop).
+  // Trade-off: 5m intra-candle dumps resolve to candle close for price path, but
+  // exits still fire AT peak×(1-trail) trigger levels (not at candle close), so
+  // different trails are still correctly differentiated.
   const bar = opts.bar ?? "5m";
   const minCandles = opts.minCandles ?? 60;
   const topN = opts.topN ?? 10;
@@ -339,9 +349,9 @@ export async function runBacktest(opts: RunBacktestOptions = {}): Promise<RunBac
 
   const start = Date.now();
 
-  // 1. Fetch trending tokens
+  // 1. Fetch hot tokens
   opts.onProgress?.("fetching", 0);
-  const tokens = await fetchTrendingTokens();
+  const tokens = await fetchHotTokens();
 
   // 2. Fetch klines in parallel batches
   const samples: Array<{ symbol: string; candles: Candle[] }> = [];
@@ -357,39 +367,84 @@ export async function runBacktest(opts: RunBacktestOptions = {}): Promise<RunBac
     if (i + 5 < tokens.length) await new Promise(r => setTimeout(r, 400));
   }
 
-  // 3. Build simple-strategy grid (ARM × TRAIL × STOP, no moonbag / no scaleout)
-  const combos: Array<{ arm: number; trail: number; stop: number }> = [];
-  for (const arm of armRange)
-    for (const trail of trailRange)
-      for (const stop of stopRange)
-        combos.push({ arm, trail, stop });
+  // 3. Build grid. Simple mode: ARM × TRAIL × STOP. Hybrid mode: additionally
+  //    grid over moonbag params (keep a sliver running after trail fires).
+  //    Scale-out is intentionally excluded — live bot doesn't support it.
+  const mbRange   = opts.moonbagRange  ?? [0, 0.10, 0.20];
+  const mbtRange  = opts.mbTrailRange  ?? [0.50, 0.60, 0.70];
+  const mbtoRange = opts.mbTimeoutRange ?? [30, 60, 120];
+  type Combo = { arm: number; trail: number; stop: number; mbPct: number; mbTrail: number; mbTimeout: number };
+  const combos: Combo[] = [];
+  for (const arm of armRange) {
+    for (const trail of trailRange) {
+      for (const stop of stopRange) {
+        if (!opts.hybrid) {
+          combos.push({ arm, trail, stop, mbPct: 0, mbTrail: 0, mbTimeout: 0 });
+        } else {
+          for (const mbPct of mbRange) {
+            if (mbPct === 0) {
+              combos.push({ arm, trail, stop, mbPct: 0, mbTrail: 0, mbTimeout: 0 });
+            } else {
+              for (const mbTrail of mbtRange) {
+                for (const mbTimeout of mbtoRange) {
+                  combos.push({ arm, trail, stop, mbPct, mbTrail, mbTimeout });
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 
   // 4. Simulate
+  //    PnL totals only include DECIDED trades (trail/stop/tp).
+  //    "holding" (never-exited) and "no_entry" (signal never fired) are tracked
+  //    separately so they can't distort the ranking.
   const results: GridResult[] = [];
   for (let i = 0; i < combos.length; i++) {
     const combo = combos[i]!;
-    let totalPnlPct = 0, wins = 0, losses = 0, holding = 0;
+    let totalPnlPct = 0, wins = 0, losses = 0, holding = 0, noEntry = 0;
     for (const s of samples) {
-      const sim = simulate(s.candles, combo.arm, combo.trail, combo.stop);
+      const sim = simulate(
+        s.candles,
+        combo.arm, combo.trail, combo.stop,
+        0, 0,                                    // no scale-out
+        combo.mbPct, combo.mbTrail, combo.mbTimeout * 60_000,
+      );
+      if (sim.reason === "no_entry") { noEntry++; continue; }
+      if (sim.reason === "holding") { holding++; continue; } // exclude from PnL totals
       totalPnlPct += sim.exitPct;
-      if (sim.reason === "holding") holding++;
-      else if (sim.exitPct >= 0) wins++;
+      if (sim.exitPct >= 0) wins++;
       else losses++;
     }
+    const decidedTrades = wins + losses;
     results.push({
       arm: combo.arm, trail: combo.trail, stop: combo.stop,
-      scaleoutPct: 0, scaleoutMult: 0, moonbagPct: 0, mbTrail: 0, mbTimeout: 0,
+      scaleoutPct: 0, scaleoutMult: 0,
+      moonbagPct: combo.mbPct, mbTrail: combo.mbTrail, mbTimeout: combo.mbTimeout,
       breakEvenAfter: 0, hardTPPct: 0,
       totalPnlPct,
-      avgExitPct: samples.length > 0 ? totalPnlPct / samples.length : 0,
-      wins, losses, holding,
-      trades: samples.length,
+      avgExitPct: decidedTrades > 0 ? totalPnlPct / decidedTrades : 0,
+      wins, losses, holding, noEntry,
+      trades: decidedTrades,
       tpHits: 0, beSaves: 0,
     });
     if (i % 5 === 0) opts.onProgress?.("simulating", Math.round((i / combos.length) * 100));
   }
 
   results.sort((a, b) => b.totalPnlPct - a.totalPnlPct);
+
+  // Sanity: if the top-5 is flat (all same totalPnlPct), something in the sim
+  // has collapsed the grid. Log loudly so regressions can't hide.
+  if (results.length >= 5) {
+    const top5 = results.slice(0, 5);
+    const flat = top5.every((r) => Math.abs(r.totalPnlPct - top5[0]!.totalPnlPct) < 0.01);
+    if (flat && top5[0]!.trades > 0) {
+      // eslint-disable-next-line no-console
+      console.warn(`[backtest] WARN: top-5 rankings are identical (+${top5[0]!.totalPnlPct.toFixed(1)}%). Grid may have collapsed.`);
+    }
+  }
 
   return {
     samplesUsed: samples.length,
@@ -408,9 +463,9 @@ async function main(): Promise<void> {
   console.log(`\n📊 memeautobuy backtest  |  bar: ${BAR}  |  min candles: ${MIN_CANDLES}`);
   console.log(`   fee: ${FEE_BPS}bps (${(FEE_BPS/100).toFixed(2)}%)  |  slippage: ${SLIPPAGE_BPS}bps (${(SLIPPAGE_BPS/100).toFixed(2)}%)  |  round-trip haircut: ${((FEE_BPS+SLIPPAGE_BPS)*2/100).toFixed(2)}%\n`);
 
-  // 1. Fetch trending tokens
-  process.stdout.write("Fetching trending tokens... ");
-  const tokens = await fetchTrendingTokens();
+  // 1. Fetch hot tokens
+  process.stdout.write("Fetching hot tokens... ");
+  const tokens = await fetchHotTokens();
   console.log(`${tokens.length} tokens`);
 
   // 2. Fetch klines in batches of 5 (avoid rate limits)
@@ -489,7 +544,7 @@ async function main(): Promise<void> {
   const results: GridResult[] = [];
 
   for (const combo of combos) {
-    let totalPnlPct = 0, wins = 0, losses = 0, holding = 0, tpHits = 0, beSaves = 0;
+    let totalPnlPct = 0, wins = 0, losses = 0, holding = 0, noEntry = 0, tpHits = 0, beSaves = 0;
 
     const mbTimeoutMs = combo.mbTimeout * 60_000;
 
@@ -500,24 +555,26 @@ async function main(): Promise<void> {
         combo.soPct, combo.soMult, combo.mbPct, combo.mbTrail, mbTimeoutMs,
         combo.breakEvenAfter, combo.hardTPPct,
       );
+      if (sim.reason === "no_entry") { noEntry++; continue; }
+      if (sim.reason === "holding") { holding++; continue; }
       totalPnlPct += sim.exitPct;
-      if (sim.reason === "holding") holding++;
-      else if (sim.exitPct >= 0) wins++;
+      if (sim.exitPct >= 0) wins++;
       else losses++;
       if (sim.reason === "tp") tpHits++;
       // break-even save: stop fired AND BE was armed AND final PnL is near zero
       if (sim.reason === "stop" && combo.breakEvenAfter > 0 && Math.abs(sim.exitPct) < 10) beSaves++;
     }
 
+    const decidedTrades = wins + losses;
     results.push({
       arm: combo.arm, trail: combo.trail, stop: combo.stop,
       scaleoutPct: combo.soPct, scaleoutMult: combo.soMult, moonbagPct: combo.mbPct,
       mbTrail: combo.mbTrail, mbTimeout: combo.mbTimeout,
       breakEvenAfter: combo.breakEvenAfter, hardTPPct: combo.hardTPPct,
       totalPnlPct,
-      avgExitPct: totalPnlPct / samples.length,
-      wins, losses, holding,
-      trades: samples.length,
+      avgExitPct: decidedTrades > 0 ? totalPnlPct / decidedTrades : 0,
+      wins, losses, holding, noEntry,
+      trades: decidedTrades,
       tpHits, beSaves,
     });
   }

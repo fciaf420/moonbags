@@ -135,7 +135,10 @@ export type SettableKey =
   | "MAX_HOLD_SECS"
   | "LLM_EXIT_ENABLED"
   | "MILESTONES_ENABLED"
-  | "MILESTONE_PCTS";
+  | "MILESTONE_PCTS"
+  | "MOONBAG_PCT"
+  | "MB_TRAIL_PCT"
+  | "MB_TIMEOUT_SECS";
 
 export type SettableValue = number | boolean | number[];
 
@@ -212,6 +215,30 @@ export const SETTABLE_SPECS: Record<SettableKey, Spec> = {
     display: (v) => {
       const arr = v as number[];
       return arr.map((n) => `+${n}%`).join(", ");
+    },
+  },
+  // Moonbag (partial kept after trail fires) — only active when LLM_EXIT_ENABLED=false.
+  // When LLM is on, partial exits are driven by the advisor's `partial_exit` action.
+  MOONBAG_PCT: {
+    type: "number",
+    validate: (v) => (typeof v === "number" && v >= 0 && v <= 0.9 ? null : "must be 0 – 0.9 (fraction kept, 0 = disabled)"),
+    display: (v) => (v === 0 ? "off" : `${((v as number) * 100).toFixed(0)}%`),
+  },
+  MB_TRAIL_PCT: {
+    type: "number",
+    validate: (v) => (typeof v === "number" && v >= 0.05 && v <= 0.95 ? null : "must be 0.05 – 0.95"),
+    display: (v) => `${((v as number) * 100).toFixed(0)}%`,
+  },
+  MB_TIMEOUT_SECS: {
+    type: "number",
+    validate: (v) =>
+      typeof v === "number" && Number.isFinite(v) && v >= 60 && v <= 86400
+        ? null
+        : "must be 60 – 86400 seconds",
+    display: (v) => {
+      const n = v as number;
+      if (n >= 3600) return `${(n / 3600).toFixed(1)}h`;
+      return `${Math.round(n / 60)}m`;
     },
   },
 };

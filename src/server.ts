@@ -44,8 +44,12 @@ const MIME: Record<string, string> = {
 };
 
 function serializePosition(p: Position): Record<string, unknown> {
-  // tokensHeld is bigint and cannot be JSON-serialized natively; render as string.
-  return { ...p, tokensHeld: p.tokensHeld.toString() };
+  // BigInt cannot be JSON-serialized natively; render token counters as strings.
+  return {
+    ...p,
+    tokensHeld: p.tokensHeld.toString(),
+    originalTokensHeld: p.originalTokensHeld?.toString(),
+  };
 }
 
 async function buildState(): Promise<Record<string, unknown>> {
