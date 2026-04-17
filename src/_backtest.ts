@@ -31,7 +31,7 @@ const SLIPPAGE_BPS = parseInt(arg("--slippage-bps", "150"));  // estimated slipp
 
 // Grid — keep tight to avoid huge run times; adjust freely
 const ARM_RANGE   = [0.30, 0.40, 0.50, 0.60];
-const TRAIL_RANGE = [0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55];
+const TRAIL_RANGE = [0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.65, 0.75, 0.85];
 const STOP_RANGE  = [0.30, 0.40, 0.50, 0.60];
 
 // Hybrid-only grids (scale-out + moonbag)
