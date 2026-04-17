@@ -25,7 +25,7 @@ const arg = (flag: string, def: string) => {
 const BAR         = arg("--bar", "5m");
 const TOP_N       = parseInt(arg("--top", "15"));
 const MIN_CANDLES = parseInt(arg("--min-candles", "60"));   // ~5 hours of 5m data
-const STRATEGY    = arg("--strategy", "simple");            // "simple" | "hybrid"
+const STRATEGY    = arg("--strategy", "simple");            // "simple" | "hybrid" | "protective"
 const FEE_BPS     = parseInt(arg("--fee-bps", "50"));         // Ultra platform fee per swap (50 bps = 0.5%)
 const SLIPPAGE_BPS = parseInt(arg("--slippage-bps", "150"));  // estimated slippage per swap (150 bps = 1.5%)
 
@@ -41,6 +41,13 @@ const MOONBAG_PCT_RANGE   = [0, 0.10, 0.20];    // fraction kept after trail (0 
 const MB_TRAIL_RANGE      = [0.50, 0.60, 0.70]; // moonbag's own trail (drawdown from its peak)
 const MB_TIMEOUT_RANGE    = [30, 60, 120];       // moonbag max hold in minutes
 
+// Protective-only grids (break-even protect + hard take-profit)
+// For BE: once price crosses the threshold, stop floor moves to entry (0% PnL).
+// For TP: sell everything when price reaches the threshold.
+// Set to 0 to disable that mechanism. A row with both BE=0 and TP=0 is the baseline.
+const BREAK_EVEN_RANGE = [0, 0.50, 0.75, 1.00];            // 50% / 75% / 100% PnL triggers break-even protection
+const HARD_TP_RANGE    = [0, 0.50, 1.00, 2.00, 3.00, 5.00]; // 50% / 1x / 2x / 3x / 5x flat take-profit
+
 // Bar interval to ms lookup for timeout simulation
 const BAR_MS: Record<string, number> = {
   "1s": 1_000, "1m": 60_000, "5m": 300_000, "15m": 900_000,
@@ -51,14 +58,17 @@ const BAR_MS: Record<string, number> = {
 // Types
 // ---------------------------------------------------------------------------
 interface Candle { ts: number; open: number; high: number; low: number; close: number }
-interface SimResult { exitPct: number; reason: "trail" | "stop" | "holding" }
+interface SimResult { exitPct: number; reason: "trail" | "stop" | "tp" | "holding" }
 interface TokenSample { address: string; symbol: string }
 interface GridResult {
   arm: number; trail: number; stop: number;
   scaleoutPct: number; scaleoutMult: number; moonbagPct: number;
   mbTrail: number; mbTimeout: number;
+  breakEvenAfter: number; hardTPPct: number;
   totalPnlPct: number; avgExitPct: number;
   wins: number; losses: number; holding: number; trades: number;
+  tpHits: number;       // how many trades exited via hard TP
+  beSaves: number;      // how many trades exited via break-even stop (saved from loss)
 }
 
 // ---------------------------------------------------------------------------
@@ -120,6 +130,8 @@ function simulate(
   arm: number, trail: number, stop: number,
   scaleoutPct = 0, scaleoutMult = 0, moonbagPct = 0,
   mbTrail = 0.60, mbTimeoutMs = 0,
+  breakEvenAfter = 0,   // if > 0, once price crosses (1+breakEvenAfter), stop floor moves to entry
+  hardTPPct = 0,        // if > 0, sell everything at the TP level (1+hardTPPct)
 ): SimResult {
   const rawEntry = candles[0].open;
   if (!rawEntry || rawEntry <= 0) return { exitPct: 0, reason: "holding" };
@@ -140,11 +152,27 @@ function simulate(
   let moonbagMode = false;
   let mbPeak = 0;
   let mbStartTs = 0;
+  let breakEvenArmed = false;   // once true, hard stop floor becomes entry (0% PnL)
 
   for (const c of candles) {
     if (!moonbagMode) {
       if (c.high > runPeak) runPeak = c.high;
       if (!armed && (c.high / decEntry - 1) >= arm) armed = true;
+
+      // Break-even protect: once price ever crosses the trigger, we never let
+      // the position close below entry. Flips on at the FIRST candle whose
+      // high breaches the threshold.
+      if (breakEvenAfter > 0 && !breakEvenArmed && (c.high / decEntry - 1) >= breakEvenAfter) {
+        breakEvenArmed = true;
+      }
+
+      // Hard take-profit: flat exit at the TP level. Takes precedence over
+      // trail/stop/scaleout — if the TP is hit, we're done.
+      if (hardTPPct > 0 && (c.high / decEntry - 1) >= hardTPPct) {
+        const tpPrice = decEntry * (1 + hardTPPct);
+        realizedPnl += position * (adjSell(tpPrice) / entry - 1);
+        return { exitPct: realizedPnl * 100, reason: "tp" };
+      }
     }
 
     // scale-out: sell a fraction at the multiplier target
@@ -169,9 +197,14 @@ function simulate(
       continue;
     }
 
-    // stop loss
-    if ((c.low / decEntry - 1) <= -stop) {
-      realizedPnl += position * (adjSell(c.close) / entry - 1);
+    // stop loss — if break-even armed, the floor becomes entry (0% PnL)
+    // instead of -stop; otherwise regular hard stop.
+    const stopFloor = breakEvenArmed ? 0 : -stop;
+    if ((c.low / decEntry - 1) <= stopFloor) {
+      // On break-even stop, model the exit at the entry price (haircut-adjusted)
+      // so the PnL is a clean ~-haircut%, not wherever the candle closed.
+      const exitPrice = breakEvenArmed ? decEntry : c.close;
+      realizedPnl += position * (adjSell(exitPrice) / entry - 1);
       return { exitPct: realizedPnl * 100, reason: "stop" };
     }
 
@@ -239,7 +272,7 @@ async function main(): Promise<void> {
 
   // 3. Build grid combos
   const barMs = BAR_MS[BAR] ?? 300_000;
-  type Combo = { arm: number; trail: number; stop: number; soPct: number; soMult: number; mbPct: number; mbTrail: number; mbTimeout: number };
+  type Combo = { arm: number; trail: number; stop: number; soPct: number; soMult: number; mbPct: number; mbTrail: number; mbTimeout: number; breakEvenAfter: number; hardTPPct: number };
   const combos: Combo[] = [];
 
   if (STRATEGY === "hybrid") {
@@ -250,18 +283,34 @@ async function main(): Promise<void> {
             for (const soMult of (soPct === 0 ? [0] : SCALEOUT_MULT_RANGE))
               for (const mbPct of MOONBAG_PCT_RANGE) {
                 if (mbPct === 0) {
-                  combos.push({ arm, trail, stop, soPct, soMult, mbPct, mbTrail: 0, mbTimeout: 0 });
+                  combos.push({ arm, trail, stop, soPct, soMult, mbPct, mbTrail: 0, mbTimeout: 0, breakEvenAfter: 0, hardTPPct: 0 });
                 } else {
                   for (const mbt of MB_TRAIL_RANGE)
                     for (const mbto of MB_TIMEOUT_RANGE)
-                      combos.push({ arm, trail, stop, soPct, soMult, mbPct, mbTrail: mbt, mbTimeout: mbto });
+                      combos.push({ arm, trail, stop, soPct, soMult, mbPct, mbTrail: mbt, mbTimeout: mbto, breakEvenAfter: 0, hardTPPct: 0 });
                 }
               }
+  } else if (STRATEGY === "protective") {
+    // Tight grid focused on answering two questions:
+    //   (a) does break-even-protect improve over baseline?
+    //   (b) is a flat +50% take-profit better than letting the trail run?
+    // Keep arm fixed at 0.5 and stop fixed at 0.4 (user's current config) to
+    // isolate the BE/TP impact. Vary trail across [0.35, 0.55] so we can see
+    // if tighter trail compounds with BE protect.
+    const PROT_ARM   = [0.5];
+    const PROT_TRAIL = [0.35, 0.55];
+    const PROT_STOP  = [0.4];
+    for (const arm of PROT_ARM)
+      for (const trail of PROT_TRAIL)
+        for (const stop of PROT_STOP)
+          for (const be of BREAK_EVEN_RANGE)
+            for (const tp of HARD_TP_RANGE)
+              combos.push({ arm, trail, stop, soPct: 0, soMult: 0, mbPct: 0, mbTrail: 0, mbTimeout: 0, breakEvenAfter: be, hardTPPct: tp });
   } else {
     for (const arm of ARM_RANGE)
       for (const trail of TRAIL_RANGE)
         for (const stop of STOP_RANGE)
-          combos.push({ arm, trail, stop, soPct: 0, soMult: 0, mbPct: 0, mbTrail: 0, mbTimeout: 0 });
+          combos.push({ arm, trail, stop, soPct: 0, soMult: 0, mbPct: 0, mbTrail: 0, mbTimeout: 0, breakEvenAfter: 0, hardTPPct: 0 });
   }
 
   console.log(`Running grid search: ${combos.length} combos × ${samples.length} tokens (strategy: ${STRATEGY})...\n`);
@@ -269,26 +318,36 @@ async function main(): Promise<void> {
   const results: GridResult[] = [];
 
   for (const combo of combos) {
-    let totalPnlPct = 0, wins = 0, losses = 0, holding = 0;
+    let totalPnlPct = 0, wins = 0, losses = 0, holding = 0, tpHits = 0, beSaves = 0;
 
     const mbTimeoutMs = combo.mbTimeout * 60_000;
 
     for (const s of samples) {
-      const sim = simulate(s.candles, combo.arm, combo.trail, combo.stop, combo.soPct, combo.soMult, combo.mbPct, combo.mbTrail, mbTimeoutMs);
+      const sim = simulate(
+        s.candles,
+        combo.arm, combo.trail, combo.stop,
+        combo.soPct, combo.soMult, combo.mbPct, combo.mbTrail, mbTimeoutMs,
+        combo.breakEvenAfter, combo.hardTPPct,
+      );
       totalPnlPct += sim.exitPct;
       if (sim.reason === "holding") holding++;
       else if (sim.exitPct >= 0) wins++;
       else losses++;
+      if (sim.reason === "tp") tpHits++;
+      // break-even save: stop fired AND BE was armed AND final PnL is near zero
+      if (sim.reason === "stop" && combo.breakEvenAfter > 0 && Math.abs(sim.exitPct) < 10) beSaves++;
     }
 
     results.push({
       arm: combo.arm, trail: combo.trail, stop: combo.stop,
       scaleoutPct: combo.soPct, scaleoutMult: combo.soMult, moonbagPct: combo.mbPct,
       mbTrail: combo.mbTrail, mbTimeout: combo.mbTimeout,
+      breakEvenAfter: combo.breakEvenAfter, hardTPPct: combo.hardTPPct,
       totalPnlPct,
       avgExitPct: totalPnlPct / samples.length,
       wins, losses, holding,
       trades: samples.length,
+      tpHits, beSaves,
     });
   }
 
@@ -297,22 +356,35 @@ async function main(): Promise<void> {
 
   // 4. Print table
   const isHybrid = STRATEGY === "hybrid";
-  const hdrExtra = isHybrid ? "SO%  SO×  MB%  MBT  MBm  " : "";
+  const isProtective = STRATEGY === "protective";
+  const hdrExtra = isHybrid
+    ? "SO%  SO×  MB%  MBT  MBm  "
+    : isProtective
+      ? "BE@    TP@    "
+      : "";
+  const dashes = isHybrid ? 98 : isProtective ? 88 : 68;
   console.log(
     "ARM".padEnd(5) + "TRAIL".padEnd(7) + "STOP".padEnd(6) + hdrExtra +
     "| TOTAL PnL".padStart(12) + " | AVG/TRADE".padStart(11) +
-    " | W / L / H".padStart(12) + " | WIN%"
+    " | W / L / H".padStart(12) + " | WIN%" +
+    (isProtective ? "  | TP hits/BE saves" : "")
   );
-  console.log("─".repeat(isHybrid ? 98 : 68));
+  console.log("─".repeat(dashes));
 
   for (const r of results.slice(0, TOP_N)) {
     const winPct = ((r.wins / (r.wins + r.losses || 1)) * 100).toFixed(0);
+    const fmtPct = (v: number) => v > 0 ? `+${(v * 100).toFixed(0)}%` : "–";
     const extra = isHybrid
       ? `${((r.scaleoutPct * 100).toFixed(0) + "%").padEnd(5)}` +
         `${(r.scaleoutMult ? r.scaleoutMult + "x" : "–").padEnd(5)}` +
         `${((r.moonbagPct * 100).toFixed(0) + "%").padEnd(5)}` +
         `${(r.mbTrail ? (r.mbTrail * 100).toFixed(0) + "%" : "–").padEnd(5)}` +
         `${(r.mbTimeout ? r.mbTimeout + "m" : "–").padEnd(5)}`
+      : isProtective
+        ? `${fmtPct(r.breakEvenAfter).padEnd(7)}${fmtPct(r.hardTPPct).padEnd(7)}`
+        : "";
+    const tail = isProtective
+      ? ` | ${String(r.tpHits).padStart(3)} / ${String(r.beSaves).padStart(3)}`
       : "";
     console.log(
       `${((r.arm   * 100).toFixed(0) + "%").padEnd(5)}` +
@@ -321,7 +393,7 @@ async function main(): Promise<void> {
       `| ${((r.totalPnlPct >= 0 ? "+" : "") + r.totalPnlPct.toFixed(1) + "%").padStart(10)} ` +
       `| ${((r.avgExitPct  >= 0 ? "+" : "") + r.avgExitPct.toFixed(1)  + "%").padStart(10)} ` +
       `| ${String(r.wins).padStart(3)} / ${String(r.losses).padStart(3)} / ${String(r.holding).padStart(3)} ` +
-      `| ${winPct}%`
+      `| ${winPct}%` + tail
     );
   }
 

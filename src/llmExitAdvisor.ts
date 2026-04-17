@@ -68,7 +68,12 @@ export type LlmContext = {
 // ---------------------------------------------------------------------------
 const MINIMAX_ENDPOINT = "https://api.minimax.io/v1/chat/completions";
 const MINIMAX_MODEL = "MiniMax-M2.7";
-const HTTP_TIMEOUT_MS = 20_000;
+// M2.7 with reasoning_split: true (interleaved thinking) regularly takes
+// 15-25s on convergence-rule reasoning over a rich snapshot. 20s was too
+// tight — about half of consults were hitting this timeout. 45s gives
+// comfortable headroom while still being under the 30s poll-to-30s poll
+// window where back-to-back aborted calls could pile up.
+const HTTP_TIMEOUT_MS = 45_000;
 const MAX_OUTPUT_TOKENS = 2000;
 
 // ---------------------------------------------------------------------------
