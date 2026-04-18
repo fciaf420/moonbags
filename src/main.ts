@@ -46,7 +46,7 @@ async function main(): Promise<void> {
   }
   const llmInterval: NodeJS.Timeout = setInterval(() => {
     tickLlmAdvisor().catch((e) => logger.error({ err: String(e) }, "tickLlmAdvisor crashed"));
-  }, 30_000);
+  }, CONFIG.LLM_POLL_MS);
 
   const shutdown = (sig: string): void => {
     logger.info(

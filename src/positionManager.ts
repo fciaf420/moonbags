@@ -1091,16 +1091,15 @@ function scheduleCleanup(mint: string): void {
 //   - per-position throttle of LLM_POLL_MS so multiple ticks within the
 //     window won't double-call the LLM for the same position
 // ---------------------------------------------------------------------------
-const LLM_POLL_MS = 30_000;
-
 export async function tickLlmAdvisor(): Promise<void> {
   if (!CONFIG.LLM_EXIT_ENABLED) return;
 
+  const llmPollMs = CONFIG.LLM_POLL_MS;
   const candidates = Array.from(positions.values()).filter((p) =>
     p.status === "open" &&
     p.armed &&
     !p.moonbagMode &&    // moonbag is disabled when LLM is on, but defensive
-    (!p.lastLlmCheckAt || Date.now() - p.lastLlmCheckAt >= LLM_POLL_MS),
+    (!p.lastLlmCheckAt || Date.now() - p.lastLlmCheckAt >= llmPollMs),
   );
 
   if (candidates.length === 0) return;

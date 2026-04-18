@@ -105,6 +105,7 @@ export const CONFIG = ({
   TELEGRAM_BOT_TOKEN: str("TELEGRAM_BOT_TOKEN") ?? "",
   TELEGRAM_CHAT_ID: str("TELEGRAM_CHAT_ID") ?? "",
   LLM_EXIT_ENABLED: bool("LLM_EXIT_ENABLED", false),
+  LLM_POLL_MS: num("LLM_POLL_MS", 30_000),
   MINIMAX_API_KEY: str("MINIMAX_API_KEY") ?? "",
   // Milestone alerts — when a position crosses one of these PnL % thresholds
   // on its way up, send a Telegram notification with a force-sell button.
@@ -133,7 +134,8 @@ export type SettableKey =
   | "MILESTONE_PCTS"
   | "MOONBAG_PCT"
   | "MB_TRAIL_PCT"
-  | "MB_TIMEOUT_SECS";
+  | "MB_TIMEOUT_SECS"
+  | "LLM_POLL_MS";
 
 export type SettableValue = number | boolean | number[];
 
@@ -234,6 +236,18 @@ export const SETTABLE_SPECS: Record<SettableKey, Spec> = {
       const n = v as number;
       if (n >= 3600) return `${(n / 3600).toFixed(1)}h`;
       return `${Math.round(n / 60)}m`;
+    },
+  },
+  LLM_POLL_MS: {
+    type: "number",
+    validate: (v) =>
+      typeof v === "number" && Number.isFinite(v) && v >= 5_000 && v <= 300_000
+        ? null
+        : "must be 5000 – 300000 ms (5s – 5min)",
+    display: (v) => {
+      const n = v as number;
+      if (n >= 60_000) return `${(n / 60_000).toFixed(1)}m`;
+      return `${Math.round(n / 1000)}s`;
     },
   },
 };

@@ -210,6 +210,7 @@ const SETTINGS_LABELS: Record<SettableKey, string> = {
   STOP_PCT:                 "🛑 Stop loss",
   MAX_HOLD_SECS:            "⏱ Max hold",
   LLM_EXIT_ENABLED:         "🧠 LLM advisor",
+  LLM_POLL_MS:              "🧠 LLM poll interval",
   MILESTONES_ENABLED:       "🎯 Milestones",
   MILESTONE_PCTS:           "🎯 Milestone %s",
   MOONBAG_PCT:              "🌙 Moonbag keep %",
