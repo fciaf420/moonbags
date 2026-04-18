@@ -266,7 +266,9 @@ export function syncRuntimeSettingsFromConfig(): RuntimeSettings {
 export function setExitStrategy(mode: ExitStrategyMode): RuntimeSettings {
   return updateRuntimeSettings((draft) => {
     draft.exit.profitStrategy.type = mode;
-    draft.exit.llm.enabled = mode === "llm_managed";
+    // Only force llm.enabled on when switching TO llm_managed — never force it off.
+    // TP Ladder, Trail, and Fixed TP can all coexist with LLM as an independent layer.
+    if (mode === "llm_managed") draft.exit.llm.enabled = true;
     if (mode === "fixed_tp") {
       draft.milestones.enabled = true;
       draft.milestones.pcts = [Math.round(draft.exit.profitStrategy.fixedTargetPct * 100)];
@@ -283,7 +285,6 @@ export function setTpTargets(targets: TpTarget[]): RuntimeSettings {
     draft.exit.profitStrategy.ladderTargets = sorted;
     draft.exit.profitStrategy.fixedTargetPct = sorted[0]?.pnlPct ?? draft.exit.profitStrategy.fixedTargetPct;
     draft.exit.profitStrategy.type = sorted.length > 1 ? "tp_ladder" : "fixed_tp";
-    draft.exit.llm.enabled = false;
     draft.milestones.enabled = true;
     draft.milestones.pcts = sorted.map((target) => Math.round(target.pnlPct * 100));
   });
