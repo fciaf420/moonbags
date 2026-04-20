@@ -1005,6 +1005,58 @@ async function handleLlm(chatId: number): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// /mcapfilter [min] [max | off] — manually set the MCap entry filter.
+// ---------------------------------------------------------------------------
+async function handleMcapFilter(chatId: number, argText: string): Promise<void> {
+  const arg = argText.trim().toLowerCase();
+
+  if (!arg) {
+    const { alertFilter } = getRuntimeSettings();
+    const active = alertFilter.mcapMin > 0 || alertFilter.mcapMax > 0;
+    const status = active
+      ? `${alertFilter.mcapMin > 0 ? fmtMcap(alertFilter.mcapMin) : "$0"} – ${alertFilter.mcapMax > 0 ? fmtMcap(alertFilter.mcapMax) : "∞"}`
+      : "none";
+    await tgPost("sendMessage", {
+      chat_id: chatId,
+      text: `<b>MCap Entry Filter</b>\nCurrent: <b>${status}</b>\n\nUsage:\n<code>/mcapfilter 50000 200000</code> — $50k–$200k\n<code>/mcapfilter 50000</code> — $50k floor, no ceiling\n<code>/mcapfilter 0 500000</code> — no floor, $500k ceiling\n<code>/mcapfilter off</code> — clear filter`,
+      parse_mode: "HTML",
+    });
+    return;
+  }
+
+  if (arg === "off" || arg === "clear" || arg === "0") {
+    updateRuntimeSettings((draft) => { draft.alertFilter.mcapMin = 0; draft.alertFilter.mcapMax = 0; });
+    await tgPost("sendMessage", { chat_id: chatId, text: "✅ MCap filter cleared — all alerts allowed.", parse_mode: "HTML" });
+    return;
+  }
+
+  const parts = arg.split(/\s+/);
+  const minVal = Number(parts[0]);
+  const maxVal = parts[1] !== undefined ? Number(parts[1]) : 0;
+
+  if (!Number.isFinite(minVal) || minVal < 0) {
+    await tgPost("sendMessage", { chat_id: chatId, text: "❌ Invalid min value. Use a number like <code>50000</code>.", parse_mode: "HTML" });
+    return;
+  }
+  if (parts[1] !== undefined && (!Number.isFinite(maxVal) || maxVal < 0)) {
+    await tgPost("sendMessage", { chat_id: chatId, text: "❌ Invalid max value. Use a number like <code>200000</code> or omit for no ceiling.", parse_mode: "HTML" });
+    return;
+  }
+  if (maxVal > 0 && maxVal <= minVal) {
+    await tgPost("sendMessage", { chat_id: chatId, text: "❌ Max must be greater than min.", parse_mode: "HTML" });
+    return;
+  }
+
+  updateRuntimeSettings((draft) => { draft.alertFilter.mcapMin = minVal; draft.alertFilter.mcapMax = maxVal; });
+  const rangeStr = `${minVal > 0 ? fmtMcap(minVal) : "$0"} – ${maxVal > 0 ? fmtMcap(maxVal) : "∞"}`;
+  await tgPost("sendMessage", {
+    chat_id: chatId,
+    text: `✅ MCap filter set: <b>${rangeStr}</b>\nAlerts outside this range will be ignored.`,
+    parse_mode: "HTML",
+  });
+}
+
+// ---------------------------------------------------------------------------
 // /skip <mint> — blacklist a token so SCG alerts for it are ignored.
 // ---------------------------------------------------------------------------
 async function handleSkip(chatId: number, argText: string): Promise<void> {
@@ -1873,7 +1925,8 @@ export function startTelegramBot(): () => void {
               case "/positions": await sendPositions(chatId); break;
               case "/settings":  await sendSettingsMenu(chatId); break;
               case "/pnl":       await handlePnl(chatId); break;
-              case "/stats":     await handleStats(chatId); break;
+              case "/stats":        await handleStats(chatId); break;
+              case "/mcapfilter":  await handleMcapFilter(chatId, argText); break;
               case "/history":   await handleHistory(chatId, argText); break;
               case "/llm":       await handleLlm(chatId); break;
               case "/pause":     await handlePause(chatId); break;
