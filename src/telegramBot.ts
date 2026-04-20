@@ -874,7 +874,7 @@ async function handleStats(chatId: number): Promise<void> {
     .map((t) => {
       const star = stats.bestMcapTier?.label === t.label ? " ★" : "";
       const pnl = t.avgPnlPct >= 0 ? `+${t.avgPnlPct.toFixed(1)}%` : `${t.avgPnlPct.toFixed(1)}%`;
-      return `  ${t.label}: ${(t.winRate * 100).toFixed(0)}% win | avg ${pnl} | ${t.count}${star}`;
+      return `  ${escapeHtml(t.label)}: ${(t.winRate * 100).toFixed(0)}% win | avg ${pnl} | ${t.count}${star}`;
     }).join("\n");
 
   const corrTop = Object.entries(stats.correlations)
