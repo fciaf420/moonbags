@@ -4,6 +4,7 @@ import { startServer } from "./server.js";
 import { startTelegramBot } from "./telegramBot.js";
 import { notifyBoot } from "./notifier.js";
 import { unwrapResidualWsol } from "./jupClient.js";
+import { startOkxWsService, stopOkxWsService, watchOkxWsMint } from "./okxWsService.js";
 import { CONFIG } from "./config.js";
 import logger from "./logger.js";
 
@@ -16,6 +17,38 @@ async function main(): Promise<void> {
   await loadPersistedPositions();
   await loadPollerState();
   await unwrapResidualWsol().catch((err) => logger.warn({ err: String(err) }, "[wsol] boot-time unwrap failed"));
+
+  let tickInFlight = false;
+  let tickQueued = false;
+  const requestPositionTick = (source: string): void => {
+    if (tickInFlight) {
+      tickQueued = true;
+      return;
+    }
+    tickInFlight = true;
+    void (async () => {
+      try {
+        do {
+          tickQueued = false;
+          await tickPositions();
+        } while (tickQueued);
+      } catch (e) {
+        logger.error({ err: String(e), source }, "tickPositions crashed");
+      } finally {
+        tickInFlight = false;
+      }
+    })();
+  };
+
+  startOkxWsService({
+    onMintEvent: (mint) => {
+      logger.debug({ mint }, "[okx-wss] event woke position tick");
+      requestPositionTick("okx-wss");
+    },
+  });
+  for (const position of getPositions().filter((p) => p.status === "open")) {
+    void watchOkxWsMint(position.mint);
+  }
 
   const stopServer = startServer();
   logger.info({ url: `http://localhost:${CONFIG.DASHBOARD_PORT}/` }, "dashboard available");
@@ -32,7 +65,7 @@ async function main(): Promise<void> {
   });
 
   const tickInterval = setInterval(() => {
-    tickPositions().catch((e) => logger.error({ err: String(e) }, "tickPositions crashed"));
+    requestPositionTick("interval");
   }, CONFIG.PRICE_POLL_MS);
 
   // LLM exit advisor — interval always runs; the gate is inside tickLlmAdvisor()
@@ -48,7 +81,10 @@ async function main(): Promise<void> {
     tickLlmAdvisor().catch((e) => logger.error({ err: String(e) }, "tickLlmAdvisor crashed"));
   }, CONFIG.LLM_POLL_MS);
 
+  let shuttingDown = false;
   const shutdown = (sig: string): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     logger.info(
       { sig, openPositions: getPositions().filter((p) => p.status === "open").length },
       "shutting down",
@@ -58,7 +94,9 @@ async function main(): Promise<void> {
     stopTelegram();
     clearInterval(tickInterval);
     clearInterval(llmInterval);
-    setTimeout(() => process.exit(0), 500);
+    void stopOkxWsService()
+      .catch((err) => logger.warn({ err: String(err) }, "[okx-wss] shutdown stop failed"))
+      .finally(() => setTimeout(() => process.exit(0), 500));
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));

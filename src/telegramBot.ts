@@ -16,6 +16,7 @@ import {
 } from "./scgPoller.js";
 import type { ScgAlertsResponse } from "./types.js";
 import { getPositionSnapshot } from "./okxClient.js";
+import { getOkxWsStatus, unwatchOkxWsMint, watchOkxWsMint } from "./okxWsService.js";
 import { escapeHtml } from "./notifier.js";
 import { runBacktest, type BacktestTpTarget } from "./_backtest.js";
 import {
@@ -84,6 +85,18 @@ function toggleConfigValue(key: SettableKey): SetConfigResult {
   const result = toggleConfigValueRaw(key);
   if (result.ok) syncRuntimeSettingsFromConfig();
   return result;
+}
+
+async function setWssEnabled(enabled: boolean): Promise<void> {
+  updateRuntimeSettings((draft) => {
+    draft.marketData.wss.enabled = enabled;
+  });
+  const open = getPositions().filter((p) => p.status === "open");
+  if (enabled) {
+    await Promise.all(open.map((p) => watchOkxWsMint(p.mint)));
+  } else {
+    await Promise.all(open.map((p) => unwatchOkxWsMint(p.mint)));
+  }
 }
 
 function strategySummaryLines(): string[] {
@@ -564,6 +577,24 @@ async function handleCallback(cq: NonNullable<Update["callback_query"]>): Promis
     return;
   }
 
+  if (data === "wss:refresh") {
+    await tgPost("answerCallbackQuery", { callback_query_id: cq.id, text: "Refreshed" });
+    await handleWss(chatId);
+    return;
+  }
+
+  if (data === "wss:enable" || data === "wss:disable") {
+    const enabled = data === "wss:enable";
+    await setWssEnabled(enabled);
+    await tgPost("answerCallbackQuery", {
+      callback_query_id: cq.id,
+      text: enabled ? "OKX WSS enabled" : "OKX WSS disabled",
+    });
+    await handleWss(chatId);
+    logger.info({ enabled }, "[okx-wss] toggled via telegram");
+    return;
+  }
+
   if (data.startsWith("adopt:")) {
     await tgPost("answerCallbackQuery", { callback_query_id: cq.id });
     await handleAdopt(chatId, data);
@@ -771,6 +802,20 @@ async function handlePing(chatId: number): Promise<void> {
   lines.push(`• dedup set size: ${health.seenSize}`);
   lines.push(`• paused: ${paused ? "🟡 yes — run /resume" : "no"}`);
   lines.push(`• blacklisted mints: ${getBlacklist().length}`);
+  const wss = getOkxWsStatus();
+  const wssLastEventAgo = wss.lastEventAt ? formatAgo(Date.now() - wss.lastEventAt) : "never";
+  const wssLastPollAgo = wss.lastPollAt ? formatAgo(Date.now() - wss.lastPollAt) : "never";
+  lines.push("");
+  lines.push("<b>OKX WSS</b>");
+  lines.push(
+    `• status: ${wss.enabled ? "enabled" : "disabled"} · ${wss.activeSessions}/${wss.watchedMints} sessions · last event ${wssLastEventAgo} · last poll ${wssLastPollAgo}`,
+  );
+  if (wss.disabledReason && !wss.enabled) {
+    lines.push(`• reason: <code>${escapeHtml(wss.disabledReason)}</code>`);
+  }
+  if (wss.lastError) {
+    lines.push(`• last error: <code>${escapeHtml(wss.lastError)}</code>`);
+  }
   lines.push(...formatRecentPollerDecisions());
   lines.push(
     `• runtime: node ${process.version} · ${process.platform}/${process.arch} · poll every ${CONFIG.SCG_POLL_MS}ms`,
@@ -781,6 +826,49 @@ async function handlePing(chatId: number): Promise<void> {
     text: lines.join("\n"),
     parse_mode: "HTML",
     disable_web_page_preview: true,
+  });
+}
+
+async function handleWss(chatId: number): Promise<void> {
+  const status = getOkxWsStatus();
+  const settings = getRuntimeSettings().marketData.wss;
+  const now = Date.now();
+  const lastEvent = status.lastEventAt ? formatAgo(now - status.lastEventAt) : "never";
+  const lastPoll = status.lastPollAt ? formatAgo(now - status.lastPollAt) : "never";
+  const openCount = getPositions().filter((p) => p.status === "open").length;
+  const lines = [
+    "📡 <b>OKX WSS</b>",
+    "",
+    `Status: <b>${status.enabled ? "enabled" : "disabled"}</b>`,
+    `Sessions: <b>${status.activeSessions}/${status.watchedMints}</b> active · ${openCount} open positions`,
+    `Channels: <code>${escapeHtml(settings.channels.join(", "))}</code>`,
+    `Poll: ${settings.pollMs}ms · wake throttle: ${settings.triggerTickMs}ms`,
+    `Last event: ${lastEvent}`,
+    `Last poll: ${lastPoll}`,
+  ];
+  if (status.disabledReason && !status.enabled) {
+    lines.push(`Reason: <code>${escapeHtml(status.disabledReason)}</code>`);
+  }
+  if (status.lastError) {
+    lines.push(`Last error: <code>${escapeHtml(status.lastError)}</code>`);
+  }
+  lines.push("");
+  lines.push("<i>WSS never buys or sells directly. It only wakes the normal Jupiter-confirmed exit checks.</i>");
+
+  const toggle = status.enabled
+    ? { text: "⏸ Disable WSS", callback_data: "wss:disable" }
+    : { text: "▶️ Enable WSS", callback_data: "wss:enable" };
+  await tgPost("sendMessage", {
+    chat_id: chatId,
+    text: lines.join("\n"),
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    reply_markup: {
+      inline_keyboard: [
+        [toggle],
+        [{ text: "🔄 Refresh", callback_data: "wss:refresh" }],
+      ],
+    },
   });
 }
 
@@ -1846,6 +1934,7 @@ export function startTelegramBot(): () => void {
       { command: "history",   description: "Last N closed trades (default 10)" },
       { command: "settings",  description: "Edit trading params live (no restart)" },
       { command: "llm",       description: "Toggle the LLM exit advisor on/off" },
+      { command: "wss",       description: "OKX WSS status + open-position acceleration toggle" },
       { command: "pause",     description: "Stop taking new SCG alerts" },
       { command: "resume",    description: "Resume taking new SCG alerts" },
       { command: "ping",      description: "Check upstream alerts API + poller + Telegram" },
@@ -1931,6 +2020,7 @@ export function startTelegramBot(): () => void {
               case "/mcapfilter":  await handleMcapFilter(chatId, argText); break;
               case "/history":   await handleHistory(chatId, argText); break;
               case "/llm":       await handleLlm(chatId); break;
+              case "/wss":       await handleWss(chatId); break;
               case "/pause":     await handlePause(chatId); break;
               case "/resume":    await handleResume(chatId); break;
               case "/ping":      await handlePing(chatId); break;

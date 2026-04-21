@@ -289,7 +289,7 @@ Jupiter Ultra provides the swap routing. The free tier is sufficient.
 
 ### 4. OKX OnchainOS
 
-This is a **compiled Rust binary** (npm package) that wraps OKX's on-chain data API. It's used by both the price feed and the LLM advisor for smart-money trades, dev wallet activity, holder PnL, and kline data.
+This is a **compiled Rust binary** (npm package) that wraps OKX's on-chain data API. It's used by the price feed, the LLM advisor, backtests, and optional WebSocket acceleration for open-position monitoring.
 
 ```bash
 npm run install:onchainos
@@ -328,6 +328,8 @@ Use `onchainos 2.1.0` or newer. If `/backtest` fails with `unrecognized subcomma
 ```bash
 npm run install:onchainos
 ```
+
+Optional: set `OKX_WSS_ENABLED=true` to let MoonBags open OKX WebSocket sessions for tokens you already hold. WSS does not create entries or execute sells; it only refreshes market data faster and wakes the normal Jupiter-confirmed exit checks sooner.
 
 Then create OnchainOS API credentials at [web3.okx.com/onchain-os/dev-portal](https://web3.okx.com/onchain-os/dev-portal). Use a read-only key and save the passphrase you set during creation.
 
@@ -416,6 +418,8 @@ MAX_ALERT_MCAP=0              # only buy alerts at or below this mcap ($). Also 
 # === POLLING ===
 SCG_POLL_MS=3000               # how often to poll SCG for new alerts
 PRICE_POLL_MS=3000             # how often to update prices for open positions
+LLM_POLL_MS=30000              # how often the LLM advisor checks armed positions
+OKX_WSS_ENABLED=false          # optional WSS acceleration for open positions only
 
 # === EXECUTION ===
 SLIPPAGE_BPS=2500              # fallback slippage for non-Ultra quotes
@@ -550,6 +554,7 @@ Every command is gated to the `TELEGRAM_CHAT_ID` in `.env` — random users who 
 | `/mcapfilter [min] [max\|off]` | Set or clear the mcap entry filter manually. `/mcapfilter 50000 200000` = $50k–$200k range. `/mcapfilter 50000` = $50k floor, no ceiling. `/mcapfilter off` = clear. Persists in `state/settings.json`. |
 | `/history [N]` | Last N closed trades (default 10, max 50) — name, PnL, exit reason, hold duration. |
 | `/llm` | One-tap toggle for the LLM exit advisor. Warns if `MINIMAX_API_KEY` is empty. |
+| `/wss` | OKX WSS status and enable/disable buttons for open-position market-data acceleration. |
 | `/pause` | Stop taking new SCG alerts. Open positions keep running. **Persists across restart.** |
 | `/resume` | Resume taking new alerts. |
 | `/sellall` | Emergency liquidation. Lists every open position, requires typing **`CONFIRM`** (exact, case-sensitive) within 60s. Any other reply cancels. |
@@ -558,6 +563,7 @@ Every command is gated to the `TELEGRAM_CHAT_ID` in `.env` — random users who 
 | `/wallet` | Full wallet address + SOL balance + Solscan link. |
 | `/backtest` | Run the SCG alert backtester. Uses each alert's `alert_time` as entry, requires post-signal OHLCV runway, compares Trail, Fixed TP, and TP Ladder, then lets you tap a row to **adopt** the exit strategy live. |
 | `/doctor` | Run a health check from Telegram. Use this when the bot starts, after changing `.env`, or when something feels off. Mirrors `npm run doctor`. |
+| `/ping` | Live connectivity check for SCG polling, Telegram delivery, and optional OKX WSS runtime state. |
 | `/setup_status` | Show a plain-English setup checklist: credentials, wallet, Telegram, OKX OnchainOS, and remaining fixes. |
 | `/update` | Check `origin/main`, show incoming commits, then pull + restart through `pm2` after confirmation. Requires `git` and a `pm2` process named `moonbags`. |
 
@@ -904,6 +910,7 @@ Common fixes:
 - Bot running under old env: `pm2 restart moonbags --update-env`.
 - Telegram quiet: send `/doctor`, then `/setup_status`, then check `pm2 logs moonbags`.
 - No entry signals: send `/ping`. If it says the poller is alive but recent decisions are filtered, check `MAX_ALERT_AGE_MINS`, `MIN_LIQUIDITY_USD`, `MIN_SCORE`, and the other alert filters in `.env`. `0` disables each numeric filter. Also check `/mcapfilter` — if an mcap range is active, alerts outside it are silently dropped.
+- WSS off: this is normal unless you set `OKX_WSS_ENABLED=true`. WSS is only an acceleration layer for positions you already hold; Jupiter still confirms every exit.
 - Need latest version: send `/update` in Telegram after `pm2` is set up.
 
 ---

@@ -580,6 +580,7 @@ export type PositionSnapshot = {
   signals:     SignalRecord[];
   kline1m:     Candle[];   // 60 min of 1m candles (the granular view)
   kline5m:     Candle[];   // 5 hours of 5m candles (broader trend context)
+  realtimeOverlay?: unknown; // optional OKX WSS cache merged by positionManager
 };
 
 export async function getPositionSnapshot(mint: string, withinMins = 30): Promise<PositionSnapshot> {

@@ -108,6 +108,7 @@ export const CONFIG = ({
   TELEGRAM_CHAT_ID: str("TELEGRAM_CHAT_ID") ?? "",
   LLM_EXIT_ENABLED: bool("LLM_EXIT_ENABLED", false),
   LLM_POLL_MS: num("LLM_POLL_MS", 30_000),
+  OKX_WSS_ENABLED: bool("OKX_WSS_ENABLED", false),
   MINIMAX_API_KEY: str("MINIMAX_API_KEY") ?? "",
   // Milestone alerts — when a position crosses one of these PnL % thresholds
   // on its way up, send a Telegram notification with a force-sell button.

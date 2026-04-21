@@ -290,6 +290,26 @@ export async function runDoctor(options: { network?: boolean } = {}): Promise<Do
     fix: hotTokens.ok ? undefined : "Run npm run install:onchainos, open a new terminal, then verify onchainos token hot-tokens --help.",
   });
 
+  const okxWssEnabled = envBool(env, "OKX_WSS_ENABLED") === true;
+  if (okxWssEnabled) {
+    const wss = await run("onchainos", ["ws", "channel-info", "--chain", "solana", "--channel", "price-info"]);
+    checks.push({
+      id: "onchainos:wss",
+      label: "OnchainOS WSS",
+      status: wss.ok ? "ok" : "fail",
+      detail: wss.ok ? "price-info channel available" : firstLine(wss.stderr || wss.stdout || (wss.error ?? "failed")),
+      fix: wss.ok ? undefined : "Update OnchainOS with npm run install:onchainos, then restart moonbags with the updated PATH.",
+    });
+  } else {
+    checks.push({
+      id: "onchainos:wss",
+      label: "OnchainOS WSS",
+      status: "warn",
+      detail: "disabled (OKX_WSS_ENABLED=false)",
+      fix: "Optional: set OKX_WSS_ENABLED=true to stream open-position market data.",
+    });
+  }
+
   const pm2 = await run("pm2", ["--version"]);
   checks.push({
     id: "pm2",

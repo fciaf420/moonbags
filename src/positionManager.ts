@@ -8,6 +8,7 @@ import { getBatchPricesParallel, getPriceViaSellQuote } from "./priceFeed.js";
 import { notifyBuy, notifyBuyFail, notifySell, notifySellFail, notifyArmed, notifyMoonbagStart, notifyLlmActive, notifyLlmTighten, notifyLlmPartial, notifyTakeProfitPartial, notifyMilestone } from "./notifier.js";
 import { consultLlm, type LlmContext } from "./llmExitAdvisor.js";
 import { getPositionSnapshot } from "./okxClient.js";
+import { getOkxWsOverlay, unwatchOkxWsMint, watchOkxWsMint } from "./okxWsService.js";
 import { getRuntimeSettings, type TpTarget } from "./settingsStore.js";
 import {
   appendLlmTradeRecord,
@@ -499,6 +500,7 @@ export async function openPosition(alert: ScgAlert): Promise<Position | null> {
   };
   positions.set(alert.mint, position);
   await flushPersist();
+  void watchOkxWsMint(alert.mint);
 
   logger.info(
     {
@@ -1211,6 +1213,7 @@ async function closePosition(mint: string, reason: CloseReason): Promise<void> {
 }
 
 function scheduleCleanup(mint: string): void {
+  void unwatchOkxWsMint(mint);
   setTimeout(() => {
     const p = positions.get(mint);
     if (p && (p.status === "closed" || p.status === "failed")) {
@@ -1299,6 +1302,19 @@ async function consultOnePosition(position: Position): Promise<void> {
     return null;
   });
   if (!snapshot) return;
+  const realtimeOverlay = getOkxWsOverlay(position.mint);
+  if (realtimeOverlay) {
+    snapshot.realtimeOverlay = {
+      lastEventAgeSecs: realtimeOverlay.lastEventAt ? Math.floor((Date.now() - realtimeOverlay.lastEventAt) / 1000) : null,
+      lastPollAgeSecs: realtimeOverlay.lastPollAt ? Math.floor((Date.now() - realtimeOverlay.lastPollAt) / 1000) : null,
+      active: realtimeOverlay.active,
+      errorCount: realtimeOverlay.errorCount,
+      lastError: realtimeOverlay.lastError ?? null,
+      latestPriceInfo: realtimeOverlay.latestPriceInfo ?? null,
+      recentTrades: realtimeOverlay.recentTrades.slice(-20),
+      recentCandles1m: realtimeOverlay.recentCandles1m.slice(-20),
+    };
+  }
 
   const decision = await consultLlm(ctx, snapshot);
   if (!decision) return;   // null = fall back to existing trail logic for this poll

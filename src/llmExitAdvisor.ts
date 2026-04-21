@@ -763,6 +763,7 @@ function compactSnapshot(snapshot: PositionSnapshot): unknown {
     // 1m: last 20 candles ≈ 20 minutes; 5m: last 12 candles ≈ 1 hour broader trend.
     kline1m: summarizeKline(snapshot.kline1m, "1m", 20),
     kline5m: summarizeKline(snapshot.kline5m, "5m", 12),
+    realtimeOverlay: snapshot.realtimeOverlay ?? null,
   };
 }
 

@@ -51,6 +51,14 @@ export type RuntimeSettings = {
     mcapMin: number;
     mcapMax: number;
   };
+  marketData: {
+    wss: {
+      enabled: boolean;
+      pollMs: number;
+      triggerTickMs: number;
+      channels: string[];
+    };
+  };
 };
 
 export const EXIT_STRATEGY_LABELS: Record<ExitStrategyMode, string> = {
@@ -107,6 +115,14 @@ function defaultSettings(): RuntimeSettings {
       mcapMin: CONFIG.MIN_ALERT_MCAP,
       mcapMax: CONFIG.MAX_ALERT_MCAP,
     },
+    marketData: {
+      wss: {
+        enabled: CONFIG.OKX_WSS_ENABLED,
+        pollMs: 1000,
+        triggerTickMs: 1000,
+        channels: ["price-info", "trades", "dex-token-candle1m"],
+      },
+    },
   };
 }
 
@@ -134,6 +150,14 @@ function normalizeTargets(value: unknown, fallback: TpTarget[]): TpTarget[] {
   return targets.length > 0 ? targets : fallback;
 }
 
+function normalizeStringList(value: unknown, fallback: string[]): string[] {
+  if (!Array.isArray(value)) return fallback;
+  const items = value
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .filter((item) => item.length > 0);
+  return items.length > 0 ? Array.from(new Set(items)) : fallback;
+}
+
 function normalizeSettings(raw: unknown): RuntimeSettings {
   const defaults = defaultSettings();
   const root = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
@@ -147,6 +171,8 @@ function normalizeSettings(raw: unknown): RuntimeSettings {
   const milestones = (root.milestones && typeof root.milestones === "object" ? root.milestones : {}) as Record<string, unknown>;
 
   const alertFilter = (root.alertFilter && typeof root.alertFilter === "object" ? root.alertFilter : {}) as Record<string, unknown>;
+  const marketData = (root.marketData && typeof root.marketData === "object" ? root.marketData : {}) as Record<string, unknown>;
+  const wss = (marketData.wss && typeof marketData.wss === "object" ? marketData.wss : {}) as Record<string, unknown>;
 
   const rawType = profit.type;
   const type: ExitStrategyMode =
@@ -196,6 +222,14 @@ function normalizeSettings(raw: unknown): RuntimeSettings {
       mcapMin: num(alertFilter.mcapMin, defaults.alertFilter.mcapMin, 0),
       mcapMax: num(alertFilter.mcapMax, defaults.alertFilter.mcapMax, 0),
     },
+    marketData: {
+      wss: {
+        enabled: bool(wss.enabled, defaults.marketData.wss.enabled),
+        pollMs: Math.round(num(wss.pollMs, defaults.marketData.wss.pollMs, 500, 60_000)),
+        triggerTickMs: Math.round(num(wss.triggerTickMs, defaults.marketData.wss.triggerTickMs, 250, 60_000)),
+        channels: normalizeStringList(wss.channels, defaults.marketData.wss.channels),
+      },
+    },
   };
 }
 
@@ -220,6 +254,7 @@ function syncConfig(next: RuntimeSettings): void {
   (CONFIG as unknown as Record<string, unknown>).MILESTONE_PCTS = next.milestones.pcts;
   (CONFIG as unknown as Record<string, unknown>).MIN_ALERT_MCAP = next.alertFilter.mcapMin;
   (CONFIG as unknown as Record<string, unknown>).MAX_ALERT_MCAP = next.alertFilter.mcapMax;
+  (CONFIG as unknown as Record<string, unknown>).OKX_WSS_ENABLED = next.marketData.wss.enabled;
 }
 
 function loadSettings(): RuntimeSettings {
@@ -273,6 +308,7 @@ export function syncRuntimeSettingsFromConfig(): RuntimeSettings {
     draft.milestones.pcts = CONFIG.MILESTONE_PCTS;
     draft.alertFilter.mcapMin = CONFIG.MIN_ALERT_MCAP;
     draft.alertFilter.mcapMax = CONFIG.MAX_ALERT_MCAP;
+    draft.marketData.wss.enabled = CONFIG.OKX_WSS_ENABLED;
     if (CONFIG.LLM_EXIT_ENABLED) {
       draft.exit.profitStrategy.type = "llm_managed";
     } else if (draft.exit.profitStrategy.type === "llm_managed") {
@@ -344,4 +380,3 @@ function trimPercent(value: number): string {
 export function formatTpTargets(targets: TpTarget[]): string {
   return targets.map((target) => `${trimPercent(target.pnlPct)}:${trimPercent(target.sellPct)}`).join(",");
 }
-
