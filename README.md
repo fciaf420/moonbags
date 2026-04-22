@@ -2,9 +2,9 @@
 
 > Solana meme-token auto-trading bot with LLM-powered exit decisions.
 
-MoonBags is the **execution and management layer** for Solana meme-token signals. By default it consumes [SCG Alpha](https://x.com/scg_alpha)'s curated alert stream, buys via Jupiter Ultra, then manages exits with either a configurable trail/stop or — optionally — a MiniMax M2.7 LLM that reads live on-chain data (smart money flow, dev holdings, holder PnL, kline trends) every 30 seconds to decide when to sell.
+MoonBags is the **execution and management layer** for Solana meme-token signals. It consumes real-time discovery streams from **OKX smart-money signals** and/or **GMGN's curated trenches + KOL call feeds**, buys via Jupiter Ultra, then manages exits with either a configurable trail/stop or — optionally — a MiniMax M2.7 LLM that reads live on-chain data (smart money flow, dev holdings, holder PnL, kline trends) every 30 seconds to decide when to sell.
 
-Telegram `/sources` can also enable optional OKX discovery or GMGN Watch/Live scanner modes. Whatever source creates the entry, MoonBags still sizes it, executes through Jupiter, watches it, and exits it with the same universal exit settings.
+Telegram `/sources` lets you pick between `okx_watch` / `okx_only` / `gmgn_watch` / `gmgn_live` / `gmgn_only` or `hybrid` at runtime, no restart. SCG Alpha is supported as a legacy source in the codebase but disabled by default. Whatever source creates the entry, MoonBags still sizes it, executes through Jupiter, watches it, and exits it with the same universal exit settings.
 
 You operate the bot through a Telegram bot (`/start`, `/positions`, `/settings`, `/sellall`, etc.) or a local web dashboard.
 
@@ -14,7 +14,7 @@ You operate the bot through a Telegram bot (`/start`, `/positions`, `/settings`,
 
 **Not financial advice.** This software is released for educational and research purposes. Using it to trade real money is your decision and your risk alone. Meme coins are extremely volatile — **you will have losing trades, and you can lose your entire wallet balance**. Nothing in this repo, the dashboard, the Telegram bot, or the LLM advisor's output constitutes investment, legal, tax, or any other kind of professional advice. Do your own research.
 
-**Critical upstream dependencies — SCG Alpha, OKX, and GMGN.** The default signal layer is SCG Alpha's ([@scg_alpha on X](https://x.com/scg_alpha)); optional source modes use OKX OnchainOS and GMGN OpenAPI directly. **I do not own, operate, or control SCG Alpha, OKX, GMGN, Jupiter, Helius, MiniMax, or Telegram**. If any provider changes API shape, rate-limits you, changes pricing, or shuts down, the affected intake or execution path can stop working until the code or provider is updated. You're also subject to each provider's terms of service.
+**Critical upstream dependencies — OKX and GMGN.** The active signal layers are OKX OnchainOS smart-money signals and GMGN OpenAPI's trenches/signal endpoints. SCG Alpha ([@scg_alpha on X](https://x.com/scg_alpha)) integration remains in the codebase but is disabled by default; re-enabling it requires uncommenting the `[SCG-DISABLED]`-tagged call sites. **I do not own, operate, or control OKX, GMGN, SCG Alpha, Jupiter, Helius, MiniMax, or Telegram**. If any provider changes API shape, rate-limits you, changes pricing, or shuts down, the affected intake or execution path can stop working until the code or provider is updated. You're also subject to each provider's terms of service.
 
 Other third-party services the bot depends on (any of which can break the bot if they change): **Jupiter Ultra** (swap execution + fees), **Helius RPC** (Solana reads), **OKX onchainos CLI** (on-chain data enrichment), **MiniMax** (LLM advisor, optional), **Telegram Bot API** (control + notifications).
 
@@ -54,22 +54,28 @@ Use at your own risk.
 
 The hardest part of meme-coin trading isn't execution — it's *discovery*. Out of the thousands of tokens minted on Solana every day, which ~10 are worth your SOL?
 
-By default, that problem is solved upstream by [SCG Alpha](https://x.com/scg_alpha). They run an alpha-filtering system that:
+MoonBags supports two active discovery sources. Pick one or run both via `/sources`:
 
-- Pulls a constant firehose of new mints, smart-money flow, holder data, and on-chain signals via the **[GMGN API](https://docs.gmgn.cc/)**
-- Applies their own scoring + filtering logic (the secret sauce — that's their product, not mine)
-- Surfaces only the alerts that pass their criteria via a public-facing alerts API
+**OKX OnchainOS (fast-twitch).** Real-time websocket stream of buys by OKX-labeled Smart Money and KOL wallets. Fires ~3 seconds after the wallet's buy lands on-chain. You're front-running the rest of the market by seconds. Default filters (after a 156-signal data analysis): `minHolders ≥ 100`, `walletTypes ∈ {SmartMoney, KOL}`, `minAmountUsd ≥ 500`, combined with a `/mcapfilter 25000` runtime floor.
 
-**MoonBags is downstream of that in SCG-only mode.** Optional `/sources` modes can also observe or buy from OKX discovery and GMGN scanner candidates, but those modes are off by default and still go through the same local pause, blacklist, cooldown, position, and Jupiter execution safety.
+**GMGN OpenAPI (curated discovery).** Polls three endpoints every 60s:
+- `/v1/trenches` — Pump.fun / pump_mayhem / letsbonk launches with smart-degen activity, safety preset on
+- `/v1/market/token_signal` — smart-money + KOL call signals (`signal_type=12`)
+- `/v1/market/rank` (trending) — **disabled by default**; buying post-pump momentum is the wrong lens for early entries
 
-If you want to see the signal quality firsthand, follow [@scg_alpha](https://x.com/scg_alpha). If you want to swap in your own discovery source, replace `src/scgPoller.ts` with your own integration — every other layer in this bot is signal-source agnostic.
+Both sources share the same safety floor, cross-source mint cooldown, blacklist, and Jupiter execution path. You can run them alongside each other (`hybrid` mode).
+
+**SCG Alpha (legacy, disabled).** The repo still contains the SCG poller behind `[SCG-DISABLED]` comment tags. Users who want SCG back can uncomment the call in `src/main.ts` and re-add `scg_only` to the source-mode array in `src/telegramBot.ts`.
+
+If you want to swap in your own discovery source, the signal-source interface is at `src/okxSignalSource.ts` and `src/gmgnSignalSource.ts` — every downstream layer (dedup, position manager, exit engine, Jupiter, Telegram) is signal-source agnostic.
 
 ---
 
 ## What it does
 
-1. **Receives** filtered alerts from SCG Alpha's API every 3 seconds — these are pre-vetted by their alpha-filtering system on top of GMGN.
-   - Optional: `/sources` can add OKX smart-money/KOL/whale discovery or GMGN scanner candidates as watch-only or live entry sources.
+1. **Receives** live signals from OKX (websocket, ~3s after smart-wallet buys land) and/or GMGN (60s poll across trenches + smart-money calls).
+   - Mode selected via `/sources`: `okx_only`, `gmgn_live`, `gmgn_only`, `hybrid`, or any of the watch-only variants.
+   - SCG Alpha polling is present in the codebase but disabled by default.
 2. **Buys** new alerts that pass your local filters via Jupiter Ultra (Solana DEX aggregator), spending a fixed SOL amount per trade.
 3. **Tracks** every open position every 3 seconds — pulls live prices, updates the running peak, and checks for arm/trail/stop conditions.
 4. **Arms** a trailing stop once a position hits a profit threshold (default +50%).
@@ -86,19 +92,23 @@ If you want to see the signal quality firsthand, follow [@scg_alpha](https://x.c
 
 ```
         ┌──────────────────────────────────────────┐
-        │   UPSTREAM — discovery / alpha source    │
+        │   UPSTREAM — discovery sources           │
         │   (NOT part of this repo, NOT mine)      │
         ├──────────────────────────────────────────┤
         │                                          │
-        │     ┌──────────┐         ┌────────────┐  │
-        │     │   GMGN   │ ──────▶ │ SCG Alpha  │  │
-        │     │   API    │  signals│  filtering │  │
-        │     │          │  + data │   engine   │  │
-        │     └──────────┘         └─────┬──────┘  │
-        │                                │ alerts  │
-        └────────────────────────────────┼─────────┘
-                                         │
-                            poll every 3s ▼
+        │   ┌──────────────┐     ┌──────────────┐  │
+        │   │     OKX      │     │     GMGN     │  │
+        │   │  OnchainOS   │     │   OpenAPI    │  │
+        │   │  (WSS, ~3s)  │     │ (60s poll)   │  │
+        │   │              │     │              │  │
+        │   │ smart-money  │     │ trenches +   │  │
+        │   │ + KOL buys   │     │ KOL signals  │  │
+        │   └──────┬───────┘     └──────┬───────┘  │
+        │          │                    │          │
+        └──────────┼────────────────────┼──────────┘
+                   │                    │
+                   └────────┬───────────┘
+                            ▼
    +-------------+   +-------------------+   +----------------+
    |   Jupiter   |<--+      MoonBags     +-->|   Solana RPC   |
    |  Ultra API  |   |  (this repo, the  |   |    (Helius)    |

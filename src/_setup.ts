@@ -224,8 +224,9 @@ async function main(): Promise<void> {
   else if (!okxPassphraseFromEnv) collected.OKX_PASSPHRASE = "";
 
   console.log("");
-  console.log(gray("   Optional GMGN source scanner key — enables GMGN Watch/Live in /sources."));
-  console.log(`   Get one at:  ${blue("https://gmgn.ai/ai")}`);
+  console.log(gray("   GMGN source scanner key — enables GMGN Watch/Live in /sources."));
+  console.log(gray("   Recommended alongside OKX for the early-buy strategy (trenches + smart-money calls)."));
+  console.log(`   Get one at:  ${blue("https://gmgn.ai/ai?chain=sol")}`);
   const gmgnKeyFromEnv = existingEnv.match(/^GMGN_API_KEY=(.*)$/m)?.[1];
   if (gmgnKeyFromEnv) console.log(`   ${dim(`current GMGN_API_KEY: ${gmgnKeyFromEnv.slice(0, 10)}...`)}`);
   const gmgnKey = await ask(`   ${bold("GMGN_API_KEY")} ${dim("(blank to keep/skip)")}: `);
