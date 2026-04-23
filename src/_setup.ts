@@ -341,20 +341,27 @@ async function main(): Promise<void> {
     }
   }
 
-  // 7. MiniMax (optional)
-  section("MiniMax API key — LLM exit advisor (optional)", 7);
-  console.log(gray("   Off by default. If enabled, MiniMax M2.7 manages exits for"));
-  console.log(gray("   armed positions using live on-chain data. You can flip it on"));
-  console.log(gray("   later via /llm in Telegram."));
-  console.log(`   Referral link (10% off):  ${blue("https://platform.minimax.io/subscribe/token-plan?code=K0Q2oDUiwK&source=link")}`);
+  // 7. LLM exit advisor (optional)
+  section("LLM exit advisor — API key (optional)", 7);
+  console.log(gray("   Off by default. If enabled, an LLM manages exits for armed positions"));
+  console.log(gray("   using live on-chain data. Enable later via /llm in Telegram."));
+  console.log(gray("   Supports MiniMax (default) or any OpenAI-compatible provider (OpenRouter etc)."));
   console.log("");
+  console.log(gray("   Option A — MiniMax (recommended default):"));
+  console.log(`   Referral link (10% off):  ${blue("https://platform.minimax.io/subscribe/token-plan?code=K0Q2oDUiwK&source=link")}`);
   const mmFromEnv = existingEnv.match(/^MINIMAX_API_KEY=(.*)$/m)?.[1];
-  if (mmFromEnv) console.log(`   ${dim(`current: ${mmFromEnv.slice(0, 12)}...`)}`);
-  const mmKey = await ask(`   ${bold("MINIMAX_API_KEY")} ${dim("(blank to skip)")}: `);
+  const llmKeyFromEnv = existingEnv.match(/^LLM_API_KEY=(.*)$/m)?.[1];
+  if (mmFromEnv || llmKeyFromEnv) console.log(`   ${dim(`current key: set`)}`);
+  console.log("");
+  const mmKey = await ask(`   ${bold("MINIMAX_API_KEY")} ${dim("(blank to skip or use LLM_API_KEY instead)")}: `);
   if (mmKey) {
     collected.MINIMAX_API_KEY = mmKey;
     console.log(gray("   Enable LLM Managed later from Telegram /settings -> Exit Strategy."));
   }
+  console.log("");
+  console.log(gray("   Option B — OpenRouter or other OpenAI-compatible provider:"));
+  console.log(gray("   Set LLM_API_KEY, LLM_ENDPOINT, and LLM_MODEL in .env manually after setup."));
+  console.log(gray("   Example: LLM_ENDPOINT=https://openrouter.ai/api/v1/chat/completions"));
 
   // 8. Trading params
   section("Trading parameters", 8);

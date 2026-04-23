@@ -397,6 +397,14 @@ If you want the LLM to manage exit decisions for armed positions:
    MINIMAX_API_KEY=your-token-plan-key
    ```
 
+**Using a different LLM provider (e.g. OpenRouter):** Set `LLM_API_KEY`, `LLM_ENDPOINT`, and `LLM_MODEL` instead. Any OpenAI-compatible provider works:
+```
+LLM_API_KEY=sk-or-v1-...
+LLM_ENDPOINT=https://openrouter.ai/api/v1/chat/completions
+LLM_MODEL=anthropic/claude-3.5-sonnet
+```
+`MINIMAX_API_KEY` is still accepted for backwards compatibility if you don't set `LLM_API_KEY`.
+
 Then choose **LLM Managed** from Telegram `/settings` → **Exit Strategy**.
 
 ---
@@ -455,7 +463,12 @@ TELEGRAM_BOT_TOKEN=8775xxxxxxx:AAGxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 TELEGRAM_CHAT_ID=518183629
 
 # === LLM EXIT ADVISOR ===
-MINIMAX_API_KEY=               # required for LLM Managed exit strategy
+# Option A — MiniMax (default)
+MINIMAX_API_KEY=               # MiniMax Token Plan key
+# Option B — any OpenAI-compatible provider (e.g. OpenRouter)
+# LLM_API_KEY=sk-or-v1-...
+# LLM_ENDPOINT=https://openrouter.ai/api/v1/chat/completions
+# LLM_MODEL=anthropic/claude-3.5-sonnet
 ```
 
 On first boot, MoonBags creates `state/settings.json` from the env defaults. Telegram `/settings` then becomes the source of truth for live trading behavior:
@@ -575,7 +588,9 @@ Every command is gated to the `TELEGRAM_CHAT_ID` in `.env` — random users who 
 | `/stats` | Signal metadata analysis — win rate + avg PnL by mcap tier, Pearson correlations between signal fields and trade outcomes. Includes an inline "Adopt" button to activate the best-performing mcap range as an entry filter in one tap. Stats grow as new trades close (forward testing only). |
 | `/mcapfilter [min] [max\|off]` | Set or clear the mcap entry filter manually. `/mcapfilter 50000 200000` = $50k–$200k range. `/mcapfilter 50000` = $50k floor, no ceiling. `/mcapfilter off` = clear. Persists in `state/settings.json`. |
 | `/history [N]` | Last N closed trades (default 10, max 50) — name, PnL, exit reason, hold duration. |
-| `/llm` | One-tap toggle for the LLM exit advisor. Warns if `MINIMAX_API_KEY` is empty. |
+| `/llm` | One-tap toggle for the LLM exit advisor. Warns if `LLM_API_KEY` (or `MINIMAX_API_KEY`) is empty. |
+| `/share` | Encode your current settings as a shareable `MB1:...` string. Forward the message to anyone — they paste it into `/import` to adopt your settings in one tap. |
+| `/import MB1:...` | Import settings shared by another user. Shows a diff and asks for confirmation before applying. |
 | `/sources` | Choose entry source mode: SCG only, OKX Watch/Live/only, or GMGN Watch/Live/only. |
 | `/wss` | OKX WSS status and enable/disable buttons for open-position market-data acceleration. |
 | `/pause` | Stop taking new SCG/OKX/GMGN entry alerts. Open positions keep running. **Persists across restart.** |
