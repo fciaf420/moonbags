@@ -325,11 +325,12 @@ function formatPosition(p: Position, info?: TokenInfo | null, audit?: JupAudit |
   const peakPct = entry > 0 ? ((peak / entry - 1) * 100).toFixed(0) : "0";
   const sm = p.signalMeta;
 
+  const pnlSign = pnl >= 0 ? "+" : "";
   const lines: string[] = [
-    // Line 1: name + source + mint + gmgn link
-    `${icon} <b>${escapeHtml(p.name)}</b>${armed}${sourceTag}  <code>${escapeHtml(mintShort)}</code>  <a href="${gmgnUrl}">gmgn</a>`,
-    // Line 2: bot PnL
-    `💰 ${pnl >= 0 ? "+" : ""}${pnl.toFixed(1)}%  ↑ peak +${peakPct}%  ↓ dd ${drawdown.toFixed(1)}%`,
+    // Line 1: PnL dominant — bold and first
+    `${icon} <b>${pnlSign}${pnl.toFixed(1)}%</b>  ↑ peak +${peakPct}%  ↓ dd ${drawdown.toFixed(1)}%`,
+    // Line 2: name + source + mint + gmgn link
+    `<b>${escapeHtml(p.name)}</b>${armed}${sourceTag}  <code>${escapeHtml(mintShort)}</code>  <a href="${gmgnUrl}">gmgn</a>`,
   ];
 
   if (info) {
