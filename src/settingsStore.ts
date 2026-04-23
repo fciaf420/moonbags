@@ -137,6 +137,8 @@ export type RuntimeSettings = {
     enabled: boolean;
     minFees: number;
     allowedScoreLabels: string[];
+    minOrganicVolumePct: number;
+    minOrganicBuyersPct: number;
   };
 };
 
@@ -293,6 +295,8 @@ function defaultSettings(): RuntimeSettings {
       enabled: true,
       minFees: 1,
       allowedScoreLabels: ["medium", "high"],
+      minOrganicVolumePct: 0,
+      minOrganicBuyersPct: 0,
     },
   };
 }
@@ -522,6 +526,8 @@ function normalizeSettings(raw: unknown): RuntimeSettings {
       enabled: bool(jupGate.enabled, defaults.jupGate.enabled),
       minFees: num(jupGate.minFees, defaults.jupGate.minFees, 0, 1_000_000_000),
       allowedScoreLabels: normalizeStringList(jupGate.allowedScoreLabels, defaults.jupGate.allowedScoreLabels, true),
+      minOrganicVolumePct: num(jupGate.minOrganicVolumePct, defaults.jupGate.minOrganicVolumePct, 0, 100),
+      minOrganicBuyersPct: num(jupGate.minOrganicBuyersPct, defaults.jupGate.minOrganicBuyersPct, 0, 100),
     },
   };
 }

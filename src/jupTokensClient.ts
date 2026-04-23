@@ -36,6 +36,10 @@ export type TokenInfo = {
   numBuys1h: number;
   numSells1h: number;
   numTraders1h: number;
+  buyVolume1h: number;
+  sellVolume1h: number;
+  buyOrganicVolume1h: number;
+  numOrganicBuyers1h: number;
   audit: {
     mintAuthorityDisabled: boolean;
     freezeAuthorityDisabled: boolean;
@@ -58,6 +62,10 @@ type JupRawStats = {
   numBuys?: number;
   numSells?: number;
   numTraders?: number;
+  numOrganicBuyers?: number;
+  buyVolume?: number;
+  sellVolume?: number;
+  buyOrganicVolume?: number;
 };
 
 type JupRawToken = {
@@ -110,6 +118,10 @@ function normalize(raw: JupRawToken): TokenInfo {
     numBuys1h: Number(s1h.numBuys ?? 0),
     numSells1h: Number(s1h.numSells ?? 0),
     numTraders1h: Number(s1h.numTraders ?? 0),
+    buyVolume1h: Number(s1h.buyVolume ?? 0),
+    sellVolume1h: Number(s1h.sellVolume ?? 0),
+    buyOrganicVolume1h: Number(s1h.buyOrganicVolume ?? 0),
+    numOrganicBuyers1h: Number(s1h.numOrganicBuyers ?? 0),
     audit: {
       mintAuthorityDisabled: Boolean(audit.mintAuthorityDisabled),
       freezeAuthorityDisabled: Boolean(audit.freezeAuthorityDisabled),

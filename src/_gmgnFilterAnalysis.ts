@@ -47,6 +47,8 @@ type Candidate = {
   // Jup-gate audit fields (fetched before klines; transient failures default to 0/"")
   fees: number;
   organicScoreLabel: string;
+  organicVolumePct: number | null;
+  organicBuyersPct: number | null;
   // Forward PnL outcome
   hasOhlcv: boolean;
   candleCount: number;
@@ -149,6 +151,8 @@ async function harvestCandidates(): Promise<Candidate[]> {
         isWashTrading: false,
         fees: 0,
         organicScoreLabel: "",
+        organicVolumePct: null,
+        organicBuyersPct: null,
         hasOhlcv: false,
         candleCount: 0,
         entryPrice: 0,
@@ -349,6 +353,8 @@ const GMGN_SWEEP_SPECS: Array<{ label: string; field: keyof Candidate; threshold
   { label: "bundlerPct (current default: 50)", field: "bundlerPct", thresholds: [100, 80, 60, 50, 40, 30, 20, 10], dir: "max" },
   { label: "creatorBalancePct (current default: 20)", field: "creatorBalancePct", thresholds: [100, 50, 30, 20, 15, 10, 5], dir: "max" },
   { label: "fees (jupGate.minFees)", field: "fees", thresholds: [0, 0.1, 0.5, 1, 2, 5, 10, 25, 50], dir: "min" },
+  { label: "organicVolumePct (jupGate.minOrganicVolumePct)", field: "organicVolumePct", thresholds: [0, 1, 2, 5, 10, 15, 20, 30], dir: "min" },
+  { label: "organicBuyersPct (jupGate.minOrganicBuyersPct)", field: "organicBuyersPct", thresholds: [0, 1, 2, 3, 5, 7, 10], dir: "min" },
 ];
 
 // Categorical sweep over Jup organicScoreLabel. Represented as a set of
@@ -418,6 +424,8 @@ export async function runGmgnFilterAnalysis(opts?: {
       if (audit) {
         c.fees = audit.fees;
         c.organicScoreLabel = audit.organicScoreLabel;
+        c.organicVolumePct = audit.organicVolumePct;
+        c.organicBuyersPct = audit.organicBuyersPct;
       }
     } catch {
       // swallow - keep defaults
@@ -512,6 +520,8 @@ async function main(): Promise<void> {
       if (audit) {
         c.fees = audit.fees;
         c.organicScoreLabel = audit.organicScoreLabel;
+        c.organicVolumePct = audit.organicVolumePct;
+        c.organicBuyersPct = audit.organicBuyersPct;
       }
     } catch {
       // ignore

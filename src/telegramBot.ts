@@ -30,7 +30,8 @@ import {
   type UpdatePreview,
 } from "./updateManager.js";
 import { formatDoctorHtml, runDoctor, type DoctorReport } from "./doctor.js";
-import { formatJupGate } from "./jupGate.js";
+import { fetchJupAudit, formatJupGate, type JupAudit } from "./jupGate.js";
+import { getTokenInfos, type TokenInfo } from "./jupTokensClient.js";
 import type { Position } from "./types.js";
 import {
   formatTpTargets,
@@ -69,7 +70,7 @@ const pendingExitEdits = new Map<number, ExitTargetEdit>();
 
 // Runtime (state/settings.json) settings that live outside SETTABLE_SPECS. The
 // Live Settings menu renders these as extra rows with their own callbacks.
-type RuntimeSettableKey = "JUP_GATE_ENABLED" | "JUP_GATE_MIN_FEES" | "JUP_GATE_SCORE_LABELS";
+type RuntimeSettableKey = "JUP_GATE_ENABLED" | "JUP_GATE_MIN_FEES" | "JUP_GATE_SCORE_LABELS" | "JUP_GATE_ORG_VOL" | "JUP_GATE_ORG_BUYERS";
 const pendingRuntimeEdits = new Map<number, RuntimeSettableKey>();
 
 const EXIT_STRATEGY_LABELS: Record<ExitStrategyMode, string> = {
@@ -299,22 +300,79 @@ async function tgPost(method: string, body: Record<string, unknown>): Promise<un
   return json;
 }
 
-function formatPosition(p: Position): string {
+function fmtUsd(n: number): string {
+  if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(2)}M`;
+  if (n >= 1_000) return `$${(n / 1_000).toFixed(1)}K`;
+  return `$${n.toFixed(4)}`;
+}
+
+function fmtPct(n: number): string {
+  return `${n >= 0 ? "+" : ""}${n.toFixed(1)}%`;
+}
+
+function formatPosition(p: Position, info?: TokenInfo | null, audit?: JupAudit | null): string {
   const entry = p.entryPricePerTokenSol;
   const cur = p.currentPricePerTokenSol;
   const peak = p.peakPricePerTokenSol;
   const pnl = entry > 0 ? ((cur / entry) - 1) * 100 : 0;
   const drawdown = peak > 0 ? (1 - cur / peak) * 100 : 0;
-  const armed = p.armed ? " ⚡" : "";
   const icon = pnl >= 0 ? "🟢" : "🔴";
+  const armed = p.armed ? " ⚡" : "";
   const mintShort = `${p.mint.slice(0, 4)}…${p.mint.slice(-4)}`;
   const gmgnUrl = `https://gmgn.ai/sol/token/${encodeURIComponent(p.mint)}`;
   const source = p.signalMeta?.source;
-  const sourceTag = source ? ` · ${escapeHtml(source)}` : "";
-  return (
-    `${icon} <b>${escapeHtml(p.name)}</b>${armed}  <a href="${gmgnUrl}"><code>${escapeHtml(mintShort)}</code></a>${sourceTag}  <a href="${gmgnUrl}">📈 GMGN</a>\n` +
-    `   PnL: ${pnl >= 0 ? "+" : ""}${pnl.toFixed(1)}%  peak: ${entry > 0 ? ((peak / entry - 1) * 100).toFixed(0) : "0"}%  pullback: ${drawdown.toFixed(1)}%`
-  );
+  const sourceTag = source ? ` <i>${escapeHtml(source)}</i>` : "";
+  const peakPct = entry > 0 ? ((peak / entry - 1) * 100).toFixed(0) : "0";
+  const sm = p.signalMeta;
+
+  const lines: string[] = [
+    // Line 1: name + source + mint link
+    `${icon} <b>${escapeHtml(p.name)}</b>${armed}${sourceTag}  <a href="${gmgnUrl}"><code>${escapeHtml(mintShort)}</code></a>`,
+    // Line 2: bot PnL
+    `💰 ${pnl >= 0 ? "+" : ""}${pnl.toFixed(1)}%  ↑ peak +${peakPct}%  ↓ dd ${drawdown.toFixed(1)}%`,
+  ];
+
+  if (info) {
+    // Line 3: price snapshot
+    const snap: string[] = [];
+    if (info.priceUsd > 0) snap.push(fmtUsd(info.priceUsd));
+    if (info.mcapUsd > 0) snap.push(`MCap ${fmtUsd(info.mcapUsd)}`);
+    if (info.liquidityUsd > 0) snap.push(`Liq ${fmtUsd(info.liquidityUsd)}`);
+    if (info.holderCount > 0) snap.push(`👥 ${info.holderCount.toLocaleString()}`);
+    if (info.organicScoreLabel) snap.push(`${escapeHtml(info.organicScoreLabel)}${info.verified ? " ✅" : ""}`);
+    if (snap.length > 0) lines.push(`📊 ${snap.join("  ·  ")}`);
+
+    // Line 4: momentum — price changes + volume + buy/sell flow
+    const mom: string[] = [];
+    const c5 = info.priceChange5m, c1h = info.priceChange1h, c24h = info.priceChange24h;
+    if (c5 !== 0 || c1h !== 0 || c24h !== 0) {
+      mom.push(`5m ${fmtPct(c5)}`, `1h ${fmtPct(c1h)}`, `24h ${fmtPct(c24h)}`);
+    }
+    const vol1h = info.buyVolume1h + info.sellVolume1h;
+    if (vol1h > 0) mom.push(`Vol ${fmtUsd(vol1h)}`);
+    if (info.numTraders1h > 0) mom.push(`${info.numBuys1h}↑ ${info.numSells1h}↓`);
+    if (audit?.organicVolumePct != null) mom.push(`orgVol ${audit.organicVolumePct.toFixed(0)}%`);
+    if (audit?.organicBuyersPct != null) mom.push(`orgBuyers ${audit.organicBuyersPct.toFixed(0)}%`);
+    if (mom.length > 0) lines.push(`📈 ${mom.join("  ·  ")}`);
+  }
+
+  // Line 5: risk/security — blend signalMeta (entry-time) with live audit
+  const risk: string[] = [];
+  const top10 = info?.audit.topHoldersPercentage ?? (sm?.top10_pct ?? 0);
+  if (top10 > 0) risk.push(`top10 ${top10.toFixed(1)}%`);
+  if (sm?.bundler_pct != null && sm.bundler_pct > 0) risk.push(`bundler ${sm.bundler_pct.toFixed(0)}%`);
+  if (sm?.rug_ratio != null && sm.rug_ratio > 0) risk.push(`rug ${sm.rug_ratio.toFixed(2)}`);
+  if (audit?.fees != null && audit.fees > 0) risk.push(`fees ${audit.fees.toFixed(1)}`);
+  if (info) {
+    const a = info.audit;
+    if (!a.mintAuthorityDisabled) risk.push(`⚠️ mint`);
+    if (!a.freezeAuthorityDisabled) risk.push(`⚠️ freeze`);
+    if (a.devMints > 0) risk.push(`devMints ${a.devMints}`);
+    if (a.isSus) risk.push(`🚨 suspicious`);
+  }
+  if (risk.length > 0) lines.push(`🔒 ${risk.join("  ·  ")}`);
+
+  return lines.join("\n");
 }
 
 function sellButtons(positions: Position[]): Array<[{ text: string; callback_data: string }]> {
@@ -464,6 +522,8 @@ async function sendAllSettingsMenu(chatId: number): Promise<void> {
   buttons.push([{ text: `Toggle 🔍 Jup gate`, callback_data: "toggle:JUP_GATE_ENABLED" }]);
   buttons.push([{ text: `Edit 🔍 Jup minFees`, callback_data: "edit:JUP_GATE_MIN_FEES" }]);
   buttons.push([{ text: `Edit 🔍 Jup score labels`, callback_data: "edit:JUP_GATE_SCORE_LABELS" }]);
+  buttons.push([{ text: `Edit 🔍 Jup organic vol %`, callback_data: "edit:JUP_GATE_ORG_VOL" }]);
+  buttons.push([{ text: `Edit 🔍 Jup organic buyers %`, callback_data: "edit:JUP_GATE_ORG_BUYERS" }]);
 
   await tgPost("sendMessage", {
     chat_id: chatId,
@@ -534,12 +594,16 @@ const RUNTIME_EDIT_LABELS: Record<RuntimeSettableKey, string> = {
   JUP_GATE_ENABLED: "🔍 Jup gate",
   JUP_GATE_MIN_FEES: "🔍 Jup minFees",
   JUP_GATE_SCORE_LABELS: "🔍 Jup score labels",
+  JUP_GATE_ORG_VOL: "🔍 Jup organic vol %",
+  JUP_GATE_ORG_BUYERS: "🔍 Jup organic buyers %",
 };
 
 function formatRuntimeCurrent(key: RuntimeSettableKey): string {
   const cfg = getRuntimeSettings().jupGate;
   if (key === "JUP_GATE_ENABLED") return cfg.enabled ? "on" : "off";
   if (key === "JUP_GATE_MIN_FEES") return String(cfg.minFees);
+  if (key === "JUP_GATE_ORG_VOL") return cfg.minOrganicVolumePct > 0 ? `${cfg.minOrganicVolumePct}%` : "off";
+  if (key === "JUP_GATE_ORG_BUYERS") return cfg.minOrganicBuyersPct > 0 ? `${cfg.minOrganicBuyersPct}%` : "off";
   const labels = cfg.allowedScoreLabels;
   return labels.length > 0 ? labels.join(",") : "(any)";
 }
@@ -550,7 +614,9 @@ async function promptForRuntimeEdit(chatId: number, key: RuntimeSettableKey): Pr
     ? `(number — e.g. 1 or 0.5)`
     : key === "JUP_GATE_SCORE_LABELS"
       ? `(comma-separated — e.g. "medium,high" or leave empty for any)`
-      : "";
+      : (key === "JUP_GATE_ORG_VOL" || key === "JUP_GATE_ORG_BUYERS")
+        ? `(0–100 — e.g. 5 for ≥5%; set 0 to disable)`
+        : "";
   const resp = await tgPost("sendMessage", {
     chat_id: chatId,
     text:
@@ -584,6 +650,16 @@ async function applyRuntimeEdit(chatId: number, key: RuntimeSettableKey, raw: st
         ? []
         : trimmed.split(",").map((s) => s.trim().toLowerCase()).filter((s) => s.length > 0);
       updateRuntimeSettings((draft) => { draft.jupGate.allowedScoreLabels = labels; });
+    } else if (key === "JUP_GATE_ORG_VOL" || key === "JUP_GATE_ORG_BUYERS") {
+      const n = Number(trimmed);
+      if (!Number.isFinite(n) || n < 0 || n > 100) {
+        await tgPost("sendMessage", { chat_id: chatId, text: `❌ Expected a number 0–100 (0 = disabled)`, parse_mode: "HTML" });
+        return;
+      }
+      updateRuntimeSettings((draft) => {
+        if (key === "JUP_GATE_ORG_VOL") draft.jupGate.minOrganicVolumePct = n;
+        else draft.jupGate.minOrganicBuyersPct = n;
+      });
     } else {
       // JUP_GATE_ENABLED — shouldn't be routed here (it's a toggle), but
       // accept truthy/falsy text as a fallback.
@@ -657,9 +733,17 @@ async function sendPositions(chatId: number): Promise<void> {
     return;
   }
 
+  const mints = open.map((p) => p.mint);
+  const [infoMap, auditResults] = await Promise.all([
+    getTokenInfos(mints).catch(() => new Map<string, TokenInfo>()),
+    Promise.all(mints.map((m) => fetchJupAudit(m).catch(() => null))),
+  ]);
+  const auditMap = new Map(mints.map((m, i) => [m, auditResults[i] ?? null]));
+  const body = open.map((p) => formatPosition(p, infoMap.get(p.mint), auditMap.get(p.mint))).join("\n<code>──────────────────</code>\n");
+
   await tgPost("sendMessage", {
     chat_id: chatId,
-    text: `📊 <b>Open Positions (${open.length})</b>\n\n${open.map(formatPosition).join("\n\n")}`,
+    text: `📊 <b>Open Positions (${open.length})</b>\n\n${body}`,
     parse_mode: "HTML",
     disable_web_page_preview: true,
     reply_markup: { inline_keyboard: sellButtons(open) },
@@ -842,7 +926,7 @@ async function handleCallback(cq: NonNullable<Update["callback_query"]>): Promis
   if (data.startsWith("edit:")) {
     const rawKey = data.slice(5);
     // Route runtime-settings edits (jupGate) separately from SETTABLE_SPECS.
-    if (rawKey === "JUP_GATE_MIN_FEES" || rawKey === "JUP_GATE_SCORE_LABELS" || rawKey === "JUP_GATE_ENABLED") {
+    if (rawKey === "JUP_GATE_MIN_FEES" || rawKey === "JUP_GATE_SCORE_LABELS" || rawKey === "JUP_GATE_ENABLED" || rawKey === "JUP_GATE_ORG_VOL" || rawKey === "JUP_GATE_ORG_BUYERS") {
       await tgPost("answerCallbackQuery", { callback_query_id: cq.id });
       await promptForRuntimeEdit(chatId, rawKey);
       return;
@@ -2122,7 +2206,7 @@ let filterSweepInFlight = false;
 // `baseline` holds the source-specific baseline numeric fields (flat
 // key → number, e.g. minHolders). `jupGate` carries cross-source jup-gate
 // suggestions to write into draft.jupGate.* alongside baseline.
-type JupGateAdoptPayload = { minFees?: number; allowedScoreLabels?: string[] };
+type JupGateAdoptPayload = { minFees?: number; allowedScoreLabels?: string[]; minOrganicVolumePct?: number; minOrganicBuyersPct?: number };
 type PendingFilterAdopt = {
   source: "okx" | "gmgn";
   baseline: Record<string, number>;
@@ -2486,6 +2570,10 @@ async function handleFilterSweep(chatId: number, source: "gmgn" | "okx"): Promis
     const bestFees = feesSweep ? bestThresholdFor(feesSweep, 20) : null;
     const labelsSweep = normalizedCategorical[0];
     const bestLabels = labelsSweep ? bestCategoricalOption(labelsSweep, 20) : null;
+    const organicVolSweep = normalizedSweeps.find((s) => s.field === "organicVolumePct") ?? null;
+    const organicBuyersSweep = normalizedSweeps.find((s) => s.field === "organicBuyersPct") ?? null;
+    const bestOrgVol = organicVolSweep ? bestThresholdFor(organicVolSweep, 20) : null;
+    const bestOrgBuyers = organicBuyersSweep ? bestThresholdFor(organicBuyersSweep, 20) : null;
 
     const jupGatePayload: JupGateAdoptPayload = {};
     const jupGateDisplay: Record<string, unknown> = {};
@@ -2498,6 +2586,14 @@ async function handleFilterSweep(chatId: number, source: "gmgn" | "okx"): Promis
     if (bestLabels !== null) {
       jupGatePayload.allowedScoreLabels = bestLabels;
       jupGateDisplay["jupGate.allowedScoreLabels"] = bestLabels;
+    }
+    if (bestOrgVol !== null && bestOrgVol > 0) {
+      jupGatePayload.minOrganicVolumePct = bestOrgVol;
+      jupGateDisplay["jupGate.minOrganicVolumePct"] = bestOrgVol;
+    }
+    if (bestOrgBuyers !== null && bestOrgBuyers > 0) {
+      jupGatePayload.minOrganicBuyersPct = bestOrgBuyers;
+      jupGateDisplay["jupGate.minOrganicBuyersPct"] = bestOrgBuyers;
     }
     const hasJupGateSuggestion = Object.keys(jupGatePayload).length > 0;
 
@@ -2775,6 +2871,12 @@ async function handleAdopt(chatId: number, data: string): Promise<void> {
       if (Array.isArray(jupGate.allowedScoreLabels)) {
         draft.jupGate.allowedScoreLabels = jupGate.allowedScoreLabels;
       }
+      if (typeof jupGate.minOrganicVolumePct === "number") {
+        draft.jupGate.minOrganicVolumePct = jupGate.minOrganicVolumePct;
+      }
+      if (typeof jupGate.minOrganicBuyersPct === "number") {
+        draft.jupGate.minOrganicBuyersPct = jupGate.minOrganicBuyersPct;
+      }
     });
     const appliedLines = Object.entries(baseline).map(([k, v]) => `  ${k}: ${v}`);
     if (typeof jupGate.minFees === "number") {
@@ -2785,6 +2887,12 @@ async function handleAdopt(chatId: number, data: string): Promise<void> {
         ? JSON.stringify(jupGate.allowedScoreLabels)
         : "[] (any)";
       appliedLines.push(`  jupGate.allowedScoreLabels: ${labelsText}`);
+    }
+    if (typeof jupGate.minOrganicVolumePct === "number") {
+      appliedLines.push(`  jupGate.minOrganicVolumePct: ${jupGate.minOrganicVolumePct}`);
+    }
+    if (typeof jupGate.minOrganicBuyersPct === "number") {
+      appliedLines.push(`  jupGate.minOrganicBuyersPct: ${jupGate.minOrganicBuyersPct}`);
     }
     const applied = appliedLines.join("\n");
     await tgPost("sendMessage", {
