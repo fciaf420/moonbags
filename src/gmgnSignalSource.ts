@@ -4,7 +4,6 @@ import logger from "./logger.js";
 import type { ScgAlert } from "./types.js";
 import { checkSignalMintCooldown, markSignalMintAccepted } from "./sourceDedupe.js";
 import { getRuntimeSettings } from "./settingsStore.js";
-import { fetchJupAudit, passesJupGate, type JupGateConfig } from "./jupGate.js";
 import { isBlacklisted, isPaused, recordAlertEvent } from "./scgPoller.js";
 import {
   getMarketSignal,
@@ -67,6 +66,8 @@ type GmgnSettings = {
     maxMarketCapUsd: number;
     minLiquidityUsd: number;
     minHolders: number;
+    minTokenAgeMins: number;
+    maxTokenAgeMins: number;
     minSmartMoneyCount: number;
     minKolCount: number;
     maxRugRatio: number;
@@ -254,7 +255,9 @@ const DEFAULT_SETTINGS: GmgnSettings = {
     minMarketCapUsd: 0,
     maxMarketCapUsd: 0,
     minLiquidityUsd: 10_000,
-    minHolders: 200,
+    minHolders: 150,
+    minTokenAgeMins: 5,
+    maxTokenAgeMins: 240,
     minSmartMoneyCount: 0,
     minKolCount: 0,
     maxRugRatio: 0.35,
@@ -268,12 +271,12 @@ const DEFAULT_SETTINGS: GmgnSettings = {
     requireNotWashTrading: true,
   },
   trigger: {
-    minScans: 2,
+    minScans: 10,
     minHolderGrowthPct: 5,
-    maxHolderGrowthPct: 0,
+    maxHolderGrowthPct: 50,
     maxLiquidityDropPct: 30,
     minBuySellRatio: 1.15,
-    minSmartOrKolCount: 1,
+    minSmartOrKolCount: 0,
   },
   mintCooldownMins: 90,
   liveScoreMin: 60,
@@ -410,6 +413,8 @@ function currentSettings(): GmgnSettings {
       maxMarketCapUsd: Math.max(0, finite(baseline.maxMcapUsd ?? filters.maxMarketCapUsd, DEFAULT_SETTINGS.filters.maxMarketCapUsd)),
       minLiquidityUsd: Math.max(0, finite(baseline.minLiquidityUsd ?? filters.minLiquidityUsd, DEFAULT_SETTINGS.filters.minLiquidityUsd)),
       minHolders: Math.max(0, Math.round(finite(baseline.minHolders ?? filters.minHolders, DEFAULT_SETTINGS.filters.minHolders))),
+      minTokenAgeMins: Math.max(0, Math.round(finite(filters.minTokenAgeMins, DEFAULT_SETTINGS.filters.minTokenAgeMins))),
+      maxTokenAgeMins: Math.max(0, Math.round(finite(filters.maxTokenAgeMins, DEFAULT_SETTINGS.filters.maxTokenAgeMins))),
       minSmartMoneyCount: Math.max(0, Math.round(finite(filters.minSmartMoneyCount, DEFAULT_SETTINGS.filters.minSmartMoneyCount))),
       minKolCount: Math.max(0, Math.round(finite(filters.minKolCount, DEFAULT_SETTINGS.filters.minKolCount))),
       maxRugRatio: finite(baseline.maxRugRatio ?? filters.maxRugRatio, DEFAULT_SETTINGS.filters.maxRugRatio),
@@ -597,6 +602,15 @@ function maybeReject(candidate: Partial<GmgnSignalCandidate>, _reason: string): 
   }
   if ((candidate.holders ?? 0) < filters.minHolders) {
     return `holders ${Math.round(candidate.holders ?? 0).toLocaleString("en-US")} < ${Math.round(filters.minHolders).toLocaleString("en-US")}`;
+  }
+  if (candidate.timestamp && candidate.timestamp > 0) {
+    const ageMins = Math.max(0, Math.floor((Date.now() - candidate.timestamp) / 60_000));
+    if (filters.minTokenAgeMins > 0 && ageMins < filters.minTokenAgeMins) {
+      return `token age ${ageMins}min < ${filters.minTokenAgeMins}min`;
+    }
+    if (filters.maxTokenAgeMins > 0 && ageMins > filters.maxTokenAgeMins) {
+      return `token age ${ageMins}min > ${filters.maxTokenAgeMins}min (too old)`;
+    }
   }
   if ((candidate.smartMoneyCount ?? 0) < filters.minSmartMoneyCount) {
     return `smart money ${Math.round(candidate.smartMoneyCount ?? 0)} < ${filters.minSmartMoneyCount}`;
@@ -954,7 +968,7 @@ function baseSeedFromRow(source: GmgnSourceKind, chain: GmgnChain, row: GmgnRow)
   const logo = getStringField(row, ["logo", "image", "icon"]);
   const timestamp =
     normalizeTimestamp(
-      getStringField(row, ["trigger_at", "timestamp", "time", "ts", "creation_timestamp", "created_at", "createdAt"]) ??
+      getStringField(row, ["trigger_at", "timestamp", "time", "ts", "creation_timestamp", "created_at", "createdAt", "open_timestamp"]) ??
         Date.now(),
     );
 
@@ -1371,27 +1385,6 @@ async function deepDiveCandidate(seed: GmgnSignalCandidate): Promise<DeepDiveRes
   next.alert = buildAlert(next);
   next.alert.score = next.score;
   next.alert.sourceMeta = next.sourceMeta;
-
-  // Jup audit gate — GMGN tokens are often not indexed by Jupiter (too new/small).
-  // When audit is null (not indexed), pass through: GMGN-native quality signals
-  // (holders, bundlerPct, hotLevel, top10Pct) already gate the token.
-  // When Jup DOES have data, enforce fees + score label as configured.
-  const jupCfg = getRuntimeSettings().jupGate;
-  const audit = await fetchJupAudit(seed.mint);
-  const effectiveCfg: JupGateConfig = audit == null
-    ? { ...jupCfg, minFees: 0, allowedScoreLabels: [] }
-    : jupCfg;
-  const gate = passesJupGate(audit, effectiveCfg);
-  if (!gate.ok) {
-    return { ok: false, reason: gate.reason };
-  }
-  if (audit) {
-    next.sourceMeta = {
-      ...next.sourceMeta,
-      jupAudit: audit,
-    };
-    next.alert.sourceMeta = next.sourceMeta;
-  }
 
   return { ok: true, candidate: next };
 }
