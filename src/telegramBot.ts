@@ -1,7 +1,7 @@
 import { CONFIG, SETTABLE_SPECS, setConfigValue as setConfigValueRaw, toggleConfigValue as toggleConfigValueRaw, type SetConfigResult, type SettableKey } from "./config.js";
 import logger from "./logger.js";
 import { getPositions, forceClosePosition, getStats, getClosedTrades, getSignalStats, type ClosedTrade } from "./positionManager.js";
-import { getWalletSolBalance, getWalletAddress } from "./jupClient.js";
+import { getWalletSolBalance, getWalletAddress, reclaimEmptyTokenAccounts, type ReclaimResult } from "./jupClient.js";
 import {
   isPaused,
   setPaused,
@@ -2000,6 +2000,41 @@ async function handleWallet(chatId: number): Promise<void> {
   });
 }
 
+async function handleReclaim(chatId: number): Promise<void> {
+  await tgPost("sendMessage", { chat_id: chatId, text: "⏳ Scanning token accounts...", parse_mode: "HTML" });
+  let result: ReclaimResult;
+  try {
+    result = await reclaimEmptyTokenAccounts();
+  } catch (err) {
+    await tgPost("sendMessage", {
+      chat_id: chatId,
+      text: `❌ Reclaim failed: ${escapeHtml((err as Error).message ?? String(err))}`,
+      parse_mode: "HTML",
+    });
+    return;
+  }
+  if (result.empty === 0) {
+    await tgPost("sendMessage", {
+      chat_id: chatId,
+      text: `✅ <b>Nothing to reclaim</b>\n\nScanned ${result.scanned} token account${result.scanned === 1 ? "" : "s"} — none are empty.`,
+      parse_mode: "HTML",
+    });
+    return;
+  }
+  const solReclaimed = (result.reclaimedLamports / 1e9).toFixed(4);
+  await tgPost("sendMessage", {
+    chat_id: chatId,
+    text:
+      `💰 <b>Rent reclaimed</b>\n\n` +
+      `Scanned: ${result.scanned} accounts\n` +
+      `Empty found: ${result.empty}\n` +
+      `Closed: <b>${result.closed}</b>\n` +
+      (result.failed > 0 ? `Failed: ${result.failed}\n` : ``) +
+      `\nReclaimed: <b>+${solReclaimed} SOL</b>`,
+    parse_mode: "HTML",
+  });
+}
+
 function formatSetupStatusHtml(report: DoctorReport): string {
   const setupIds = new Set([
     "os",
@@ -3557,6 +3592,7 @@ export function startTelegramBot(): () => void {
       { command: "skip",      description: "Blacklist a mint (or list/clear)" },
       { command: "mint",      description: "On-demand on-chain snapshot of any token" },
       { command: "wallet",    description: "Show wallet address + SOL balance" },
+      { command: "reclaim",   description: "Close empty token accounts and reclaim rent SOL" },
       { command: "backtest",        description: "Backtest exit strategies against GMGN candidates + one-tap adopt" },
       { command: "backtest_hybrid", description: "Same as /backtest hybrid (adds moonbag grid)" },
       { command: "doctor",    description: "Run setup and runtime health checks" },
@@ -3652,6 +3688,7 @@ export function startTelegramBot(): () => void {
               case "/skip":      await handleSkip(chatId, argText); break;
               case "/mint":      await handleMint(chatId, argText); break;
               case "/wallet":    await handleWallet(chatId); break;
+              case "/reclaim":   await handleReclaim(chatId); break;
               case "/backtest":        await handleBacktest(chatId, argText); break;
               case "/backtest_hybrid": await handleBacktest(chatId, "hybrid"); break;
               case "/doctor":    await handleDoctor(chatId); break;

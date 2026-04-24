@@ -104,6 +104,116 @@ export async function unwrapResidualWsol(): Promise<number | null> {
 
 const TOKEN_2022_PROGRAM_ID = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
 
+// ---------------------------------------------------------------------------
+// Rent reclaim — close zero-balance SPL token accounts to recover locked SOL.
+// ---------------------------------------------------------------------------
+
+export type ReclaimResult = {
+  scanned: number;
+  empty: number;
+  closed: number;
+  failed: number;
+  reclaimedLamports: number;
+};
+
+async function closeAccountsBatch(
+  conn: Connection,
+  kp: Keypair,
+  accounts: Array<{ pubkey: PublicKey; lamports: number }>,
+  programId: PublicKey,
+): Promise<{ closed: number; failed: number; reclaimedLamports: number }> {
+  let closed = 0, failed = 0, reclaimedLamports = 0;
+  const BATCH = 20;
+  for (let i = 0; i < accounts.length; i += BATCH) {
+    const batch = accounts.slice(i, i + BATCH);
+    const tx = new Transaction();
+    for (const { pubkey } of batch) {
+      tx.add(
+        new TransactionInstruction({
+          keys: [
+            { pubkey, isSigner: false, isWritable: true },
+            { pubkey: kp.publicKey, isSigner: false, isWritable: true },
+            { pubkey: kp.publicKey, isSigner: true, isWritable: false },
+          ],
+          programId,
+          data: Buffer.from([9]),
+        }),
+      );
+    }
+    try {
+      await sendAndConfirmTransaction(conn, tx, [kp], { commitment: "confirmed" });
+      for (const { lamports } of batch) reclaimedLamports += lamports;
+      closed += batch.length;
+      logger.info({ batchIndex: Math.floor(i / BATCH) + 1, count: batch.length }, "[reclaim] batch closed");
+    } catch (batchErr) {
+      logger.warn({ err: String(batchErr), batchStart: i }, "[reclaim] batch failed, retrying one-by-one");
+      for (const { pubkey, lamports } of batch) {
+        const single = new Transaction().add(
+          new TransactionInstruction({
+            keys: [
+              { pubkey, isSigner: false, isWritable: true },
+              { pubkey: kp.publicKey, isSigner: false, isWritable: true },
+              { pubkey: kp.publicKey, isSigner: true, isWritable: false },
+            ],
+            programId,
+            data: Buffer.from([9]),
+          }),
+        );
+        try {
+          await sendAndConfirmTransaction(conn, single, [kp], { commitment: "confirmed" });
+          reclaimedLamports += lamports;
+          closed++;
+        } catch (err) {
+          logger.warn({ account: pubkey.toBase58(), err: String(err) }, "[reclaim] single close failed");
+          failed++;
+        }
+      }
+    }
+  }
+  return { closed, failed, reclaimedLamports };
+}
+
+export async function reclaimEmptyTokenAccounts(): Promise<ReclaimResult> {
+  const result: ReclaimResult = { scanned: 0, empty: 0, closed: 0, failed: 0, reclaimedLamports: 0 };
+  if (!CONFIG.PRIV_B58) return result;
+  try {
+    const kp = Keypair.fromSecretKey(bs58.decode(CONFIG.PRIV_B58));
+    const conn = getConnection();
+    const [standard, ext] = await Promise.all([
+      conn.getParsedTokenAccountsByOwner(kp.publicKey, { programId: TOKEN_PROGRAM_ID_PK }),
+      conn.getParsedTokenAccountsByOwner(kp.publicKey, { programId: TOKEN_2022_PROGRAM_ID }),
+    ]);
+    result.scanned = standard.value.length + ext.value.length;
+
+    type ParsedInfo = { parsed?: { info?: { tokenAmount?: { amount?: string } } } };
+    const filterEmpty = (accounts: typeof standard.value) =>
+      accounts
+        .filter(({ account }) => (account.data as ParsedInfo).parsed?.info?.tokenAmount?.amount === "0")
+        .map(({ pubkey, account }) => ({ pubkey, lamports: account.lamports }));
+
+    const emptyStd = filterEmpty(standard.value);
+    const emptyExt = filterEmpty(ext.value);
+    result.empty = emptyStd.length + emptyExt.length;
+
+    if (result.empty === 0) return result;
+
+    const r1 = await closeAccountsBatch(conn, kp, emptyStd, TOKEN_PROGRAM_ID_PK);
+    const r2 = await closeAccountsBatch(conn, kp, emptyExt, TOKEN_2022_PROGRAM_ID);
+    result.closed = r1.closed + r2.closed;
+    result.failed = r1.failed + r2.failed;
+    result.reclaimedLamports = r1.reclaimedLamports + r2.reclaimedLamports;
+
+    logger.info(
+      { scanned: result.scanned, empty: result.empty, closed: result.closed, failed: result.failed, reclaimedSol: (result.reclaimedLamports / 1e9).toFixed(4) },
+      "[reclaim] sweep complete",
+    );
+    return result;
+  } catch (err) {
+    logger.warn({ err: String(err) }, "[reclaim] sweep failed");
+    throw err;
+  }
+}
+
 export async function getWalletSolBalance(): Promise<number | null> {
   if (!CONFIG.PRIV_B58) return null;
   try {
