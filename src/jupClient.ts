@@ -83,7 +83,7 @@ export async function unwrapResidualWsol(): Promise<number | null> {
         }),
       );
       try {
-        const sig = await sendAndConfirmTransaction(conn, tx, [kp], { commitment: "confirmed" });
+        const sig = await sendAndConfirmTransaction(conn, tx, [kp], { commitment: "confirmed", skipPreflight: true });
         const reclaimed = Number(balance) / 1e9;
         reclaimedSol += reclaimed;
         closedCount++;
@@ -175,7 +175,7 @@ async function closeAccountsBatch(
       );
     }
     try {
-      await sendAndConfirmTransaction(conn, tx, [kp], { commitment: "confirmed" });
+      await sendAndConfirmTransaction(conn, tx, [kp], { commitment: "confirmed", skipPreflight: true });
       for (const { lamports } of batch) reclaimedLamports += lamports;
       closed += batch.length;
       logger.info({ batchIndex: Math.floor(i / BATCH) + 1, count: batch.length }, "[reclaim] batch closed");
@@ -194,7 +194,7 @@ async function closeAccountsBatch(
           }),
         );
         try {
-          await sendAndConfirmTransaction(conn, single, [kp], { commitment: "confirmed" });
+          await sendAndConfirmTransaction(conn, single, [kp], { commitment: "confirmed", skipPreflight: true });
           reclaimedLamports += lamports;
           closed++;
         } catch (err) {
