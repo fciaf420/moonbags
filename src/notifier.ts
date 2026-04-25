@@ -189,33 +189,58 @@ export function notifyLlmActive(args: {
   );
 }
 
-export function notifyLlmHeartbeat(args: {
+export function notifyLlmHeartbeat(items: Array<{
   name: string;
   mint: string;
   pnlPct: number;
-  trailFloorSol: number;
-  lastAction: string;        // hold | set_trail | exit_now | partial_exit
-  lastReason: string;        // full LLM reasoning text
-  watchingMins: number;
-}): Promise<void> {
-  const sign = args.pnlPct >= 0 ? "+" : "";
-  const held = args.watchingMins >= 60
-    ? `${Math.floor(args.watchingMins / 60)}h ${args.watchingMins % 60}m`
-    : `${args.watchingMins}m`;
-  const actionLabel: Record<string, string> = {
-    hold: "HOLD",
-    set_trail: "TRAIL ADJUST",
-    exit_now: "EXIT",
-    partial_exit: "PARTIAL EXIT",
+  peakPnlPct: number;
+  trailPct: number;
+  floorPnlPct: number;
+  heldMs: number;
+  lastCheckedMs: number | null;
+  decisionCount: number;
+  lastAction: string;
+  lastReason: string;
+  lastDecisionMs: number | null;
+}>): Promise<void> {
+  const fmtAge = (ms: number): string => {
+    if (ms < 60_000) return `${Math.round(ms / 1000)}s ago`;
+    if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m ago`;
+    return `${Math.floor(ms / 3_600_000)}h ${Math.floor((ms % 3_600_000) / 60_000)}m ago`;
   };
-  const label = actionLabel[args.lastAction] ?? args.lastAction.toUpperCase();
-  return send(
-    `🤖 <b>LLM heartbeat — ${escapeHtml(args.name)}</b>\n` +
-    `PnL: <b>${sign}${(args.pnlPct * 100).toFixed(1)}%</b>  |  floor: ${args.trailFloorSol.toFixed(4)} SOL\n` +
-    `watched: ${held}  |  decision: <b>${label}</b>\n` +
-    `<i>"${escapeHtml(args.lastReason)}"</i>\n` +
-    `<a href="${gmgn(escapeHtml(args.mint))}">GMGN</a>`,
-  );
+  const fmtHeld = (ms: number): string => {
+    const mins = Math.floor(ms / 60_000);
+    if (mins < 60) return `${mins}m`;
+    return `${Math.floor(mins / 60)}h ${mins % 60}m`;
+  };
+  const actionEmoji: Record<string, string> = {
+    hold: "🟡",
+    set_trail: "🟠",
+    exit_now: "🔴",
+    partial_exit: "🟣",
+  };
+  const count = items.length;
+  const header = `🧠 <b>LLM check-in</b>  (watching ${count} position${count !== 1 ? "s" : ""})`;
+  const blocks = items.map((item) => {
+    const posEmoji = item.pnlPct >= 0 ? "🟢" : "🔴";
+    const sign = (n: number) => n >= 0 ? "+" : "";
+    const pullbackPct = item.peakPnlPct > 0
+      ? (1 - (1 + item.pnlPct) / (1 + item.peakPnlPct)) * 100
+      : 0;
+    const emoji = actionEmoji[item.lastAction] ?? "⚪";
+    const checkedStr = item.lastCheckedMs !== null ? fmtAge(item.lastCheckedMs) : "—";
+    const decisionStr = item.lastDecisionMs !== null ? fmtAge(item.lastDecisionMs) : "—";
+    return (
+      `${posEmoji} <b>${escapeHtml(item.name)}</b> ⚡  held ${fmtHeld(item.heldMs)}\n` +
+      `   PnL: ${sign(item.pnlPct)}${(item.pnlPct * 100).toFixed(1)}%  peak: ${sign(item.peakPnlPct)}${(item.peakPnlPct * 100).toFixed(1)}%  pullback: ${pullbackPct.toFixed(1)}%\n` +
+      `   trail: ${(item.trailPct * 100).toFixed(0)}%  floor: ${sign(item.floorPnlPct)}${(item.floorPnlPct * 100).toFixed(1)}%\n` +
+      `   🤖 Last checked ${checkedStr}  ·  ${item.decisionCount} decision${item.decisionCount !== 1 ? "s" : ""} total\n` +
+      `   ${emoji} ${item.lastAction.replace("_", " ")}  ${decisionStr}\n` +
+      `      <i>"${escapeHtml(item.lastReason)}"</i>\n` +
+      `   <a href="${gmgn(escapeHtml(item.mint))}">GMGN</a>`
+    );
+  });
+  return send([header, ...blocks].join("\n\n"));
 }
 
 export function notifyLlmTighten(args: {

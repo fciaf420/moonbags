@@ -81,6 +81,8 @@ export interface Position {
   lastLlmReason?: string;         // surfaced in the SELL Telegram message when LLM triggers exit
   llmWatchStartedAt?: number;     // timestamp when LLM first picked up this position
   lastLlmHeartbeatAt?: number;    // timestamp of most recent heartbeat notification
+  llmDecisionCount?: number;      // total number of LLM decisions made for this position
+  lastLlmDecisionAt?: number;     // timestamp of most recent LLM decision
   // Milestone notifications: which PnL-% thresholds have already fired (fire-once dedupe)
   milestonesHit?: number[];
   // TP ladder targets already executed for this position (stores target indexes).

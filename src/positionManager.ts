@@ -1090,7 +1090,10 @@ async function partialSellPosition(
   position.status = "open";
   position.sellFailureCount = 0;
   position.lastSellAttemptAt = undefined;
+  position.lastLlmAction = "partial_exit";
   position.lastLlmReason = reason;
+  position.lastLlmDecisionAt = Date.now();
+  position.llmDecisionCount = (position.llmDecisionCount ?? 0) + 1;
 
   // Log the partial in the position history so subsequent consults know.
   position.partialExits = position.partialExits ?? [];
@@ -1317,30 +1320,43 @@ export async function tickLlmHeartbeat(): Promise<void> {
   if (!CONFIG.LLM_EXIT_ENABLED) return;
   const heartbeatMs = CONFIG.LLM_HEARTBEAT_MINS * 60_000;
   const now = Date.now();
-  const watched = Array.from(positions.values()).filter((p) =>
-    p.status === "open" && p.llmActiveNotified && p.llmWatchStartedAt,
+  const due = Array.from(positions.values()).filter((p) =>
+    p.status === "open" &&
+    p.llmActiveNotified &&
+    p.llmWatchStartedAt &&
+    (!p.lastLlmHeartbeatAt || now - p.lastLlmHeartbeatAt >= heartbeatMs),
   );
-  for (const p of watched) {
-    if (p.lastLlmHeartbeatAt && now - p.lastLlmHeartbeatAt < heartbeatMs) continue;
+  if (due.length === 0) return;
+  for (const p of due) {
     p.lastLlmHeartbeatAt = now;
     markDirty();
+  }
+  const items = due.map((p) => {
     const entry = p.entryPricePerTokenSol;
     const current = p.currentPricePerTokenSol;
+    const peak = p.peakPricePerTokenSol;
     const pnlPct = entry > 0 ? current / entry - 1 : 0;
-    const trailFloorSol = p.armed
-      ? p.peakPricePerTokenSol * (1 - (p.dynamicTrailPct ?? CONFIG.TRAIL_PCT)) * (Number(p.tokensHeld) / 10 ** p.tokenDecimals)
-      : p.entryPricePerTokenSol * (1 - CONFIG.STOP_PCT) * (Number(p.tokensHeld) / 10 ** p.tokenDecimals);
-    const watchingMins = Math.round((now - (p.llmWatchStartedAt ?? p.openedAt)) / 60_000);
-    void notifyLlmHeartbeat({
+    const peakPnlPct = entry > 0 ? peak / entry - 1 : 0;
+    const trailPct = p.dynamicTrailPct ?? CONFIG.TRAIL_PCT;
+    const floorPnlPct = p.armed
+      ? (1 + peakPnlPct) * (1 - trailPct) - 1
+      : -CONFIG.STOP_PCT;
+    return {
       name: p.name,
       mint: p.mint,
       pnlPct,
-      trailFloorSol,
+      peakPnlPct,
+      trailPct,
+      floorPnlPct,
+      heldMs: now - p.openedAt,
+      lastCheckedMs: p.lastLlmCheckAt ? now - p.lastLlmCheckAt : null,
+      decisionCount: p.llmDecisionCount ?? 0,
       lastAction: p.lastLlmAction ?? "hold",
       lastReason: p.lastLlmReason ?? "no decision yet",
-      watchingMins,
-    });
-  }
+      lastDecisionMs: p.lastLlmDecisionAt ? now - p.lastLlmDecisionAt : null,
+    };
+  });
+  void notifyLlmHeartbeat(items);
 }
 
 async function consultOnePosition(position: Position): Promise<void> {
@@ -1417,6 +1433,8 @@ async function consultOnePosition(position: Position): Promise<void> {
     logger.debug({ mint: position.mint, reason: decision.reason }, "[llm] hold");
     position.lastLlmAction = "hold";
     position.lastLlmReason = decision.reason;
+    position.lastLlmDecisionAt = Date.now();
+    position.llmDecisionCount = (position.llmDecisionCount ?? 0) + 1;
     markDirty();
     return;
   }
@@ -1432,6 +1450,8 @@ async function consultOnePosition(position: Position): Promise<void> {
     position.dynamicTrailPct = decision.newTrailPct;
     position.lastLlmAction = "set_trail";
     position.lastLlmReason = decision.reason;
+    position.lastLlmDecisionAt = Date.now();
+    position.llmDecisionCount = (position.llmDecisionCount ?? 0) + 1;
     markDirty();
     logger.info(
       { mint: position.mint, oldTrail, newTrail: decision.newTrailPct, direction, reason: decision.reason },
@@ -1454,6 +1474,8 @@ async function consultOnePosition(position: Position): Promise<void> {
     logger.info({ mint: position.mint, reason: decision.reason }, "[llm] exit triggered");
     position.lastLlmAction = "exit_now";
     position.lastLlmReason = decision.reason;
+    position.lastLlmDecisionAt = Date.now();
+    position.llmDecisionCount = (position.llmDecisionCount ?? 0) + 1;
     markDirty();
     await closePosition(position.mint, "llm");
     return;
