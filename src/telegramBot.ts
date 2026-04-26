@@ -409,6 +409,7 @@ const SETTINGS_LABELS: Record<SettableKey, string> = {
   LLM_ENTRY_ENABLED:        "🚪 LLM entry gate",
   LLM_EXIT_IMMEDIATE:       "⚡ LLM immediate exit",
   LLM_POLL_MS:              "🧠 LLM poll interval",
+  LLM_HEARTBEAT_MINS:       "⏱ Heartbeat interval",
   MILESTONES_ENABLED:       "🎯 Milestones",
   MILESTONE_PCTS:           "🎯 Milestone %s",
   MOONBAG_PCT:              "🌙 Moonbag keep %",
@@ -499,7 +500,7 @@ async function sendRiskControlsMenu(chatId: number): Promise<void> {
 
 // LLM mode toggles have their own /llm panel — exclude from the generic settings screen
 // to avoid confusion when both panels have toggle buttons for the same flags.
-const LLM_MODE_KEYS = new Set<SettableKey>(["LLM_EXIT_ENABLED", "LLM_ENTRY_ENABLED", "LLM_EXIT_IMMEDIATE"]);
+const LLM_MODE_KEYS = new Set<SettableKey>(["LLM_EXIT_ENABLED", "LLM_ENTRY_ENABLED", "LLM_EXIT_IMMEDIATE", "LLM_HEARTBEAT_MINS"]);
 
 async function sendAllSettingsMenu(chatId: number): Promise<void> {
   const keys = (Object.keys(SETTABLE_SPECS) as SettableKey[]).filter((k) => !LLM_MODE_KEYS.has(k));
@@ -855,6 +856,20 @@ async function handleCallback(cq: NonNullable<Update["callback_query"]>): Promis
       show_alert: false,
     });
     await handleLlm(chatId, "");
+    return;
+  }
+
+  if (data.startsWith("llm_heartbeat:")) {
+    const mins = Number(data.split(":")[1]);
+    const result = setConfigValue("LLM_HEARTBEAT_MINS", String(mins));
+    await tgPost("answerCallbackQuery", {
+      callback_query_id: cq.id,
+      text: result.ok
+        ? `Heartbeat: ${SETTABLE_SPECS.LLM_HEARTBEAT_MINS.display(mins)}`
+        : `❌ ${result.error}`,
+      show_alert: !result.ok,
+    });
+    if (result.ok) await handleLlm(chatId, "");
     return;
   }
 
@@ -1866,6 +1881,10 @@ async function handleLlm(chatId: number, argText: string): Promise<void> {
   const exitOn = CONFIG.LLM_EXIT_ENABLED;
   const entryOn = CONFIG.LLM_ENTRY_ENABLED;
   const immediateOn = CONFIG.LLM_EXIT_IMMEDIATE;
+  const heartbeatMins = CONFIG.LLM_HEARTBEAT_MINS;
+  const heartbeatDisplay = SETTABLE_SPECS.LLM_HEARTBEAT_MINS.display(heartbeatMins);
+  const heartbeatPresets = [15, 30, 60, 120, 0] as const;
+  const heartbeatLabels: Record<number, string> = { 15: "15m", 30: "30m", 60: "1h", 120: "2h", 0: "off" };
   await tgPost("sendMessage", {
     chat_id: chatId,
     parse_mode: "HTML",
@@ -1874,7 +1893,8 @@ async function handleLlm(chatId: number, argText: string): Promise<void> {
       `🚪 Entry gate:      <b>${entryOn ? "🤖 ON" : "⚪️ OFF"}</b>\n` +
       `📤 Exit advisor:    <b>${exitOn ? "🤖 ON" : "⚪️ OFF"}</b>\n` +
       `⚡ Immediate exit:  <b>${immediateOn ? "🤖 ON" : "⚪️ OFF"}</b>` +
-      (immediateOn ? `  <i>(LLM watches from entry, not just after arm)</i>` : "") + `\n` +
+      (immediateOn ? `  <i>(watches from entry, not just after arm)</i>` : "") + `\n` +
+      `⏱ Heartbeat:       <b>${heartbeatDisplay}</b>\n` +
       (!keySet ? `\n⚠️ LLM_API_KEY is not set.` : `\n✅ API key set · model: ${CONFIG.LLM_MODEL}`),
     reply_markup: {
       inline_keyboard: [
@@ -1885,6 +1905,10 @@ async function handleLlm(chatId: number, argText: string): Promise<void> {
         [
           { text: `${immediateOn ? "🔴 Disable" : "🟢 Enable"} immediate exit`, callback_data: "llm_toggle_immediate" },
         ],
+        heartbeatPresets.map((mins) => ({
+          text: `${heartbeatMins === mins ? "✅ " : ""}${heartbeatLabels[mins]}`,
+          callback_data: `llm_heartbeat:${mins}`,
+        })),
       ],
     },
   });

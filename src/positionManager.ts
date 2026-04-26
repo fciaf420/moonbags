@@ -1330,6 +1330,7 @@ export async function tickLlmAdvisor(): Promise<void> {
 
 export async function tickLlmHeartbeat(): Promise<void> {
   if (!CONFIG.LLM_EXIT_ENABLED) return;
+  if (CONFIG.LLM_HEARTBEAT_MINS === 0) return; // heartbeat disabled
   const heartbeatMs = CONFIG.LLM_HEARTBEAT_MINS * 60_000;
   const now = Date.now();
   const due = Array.from(positions.values()).filter((p) =>
