@@ -35,6 +35,7 @@ async function main(): Promise<void> {
 
   let tickInFlight = false;
   let tickQueued = false;
+  let lastTickCompletedAt: number = Date.now();
   const requestPositionTick = (source: string): void => {
     if (tickInFlight) {
       tickQueued = true;
@@ -46,6 +47,7 @@ async function main(): Promise<void> {
         do {
           tickQueued = false;
           await tickPositions();
+          lastTickCompletedAt = Date.now();
         } while (tickQueued);
       } catch (e) {
         logger.error({ err: String(e), source }, "tickPositions crashed");
@@ -118,6 +120,21 @@ async function main(): Promise<void> {
     requestPositionTick("interval");
   }, CONFIG.PRICE_POLL_MS);
 
+  // Watchdog: if tickInFlight has been stuck for >90s the async task likely hung.
+  // Force-reset the flags and re-trigger a tick so position monitoring recovers.
+  const WATCHDOG_HANG_MS = 90_000;
+  const watchdogInterval = setInterval(() => {
+    if (tickInFlight && Date.now() - lastTickCompletedAt > WATCHDOG_HANG_MS) {
+      logger.warn(
+        { staleSinceMs: Date.now() - lastTickCompletedAt },
+        "[watchdog] tickPositions appears hung — force-resetting tickInFlight and re-triggering",
+      );
+      tickInFlight = false;
+      tickQueued = false;
+      requestPositionTick("watchdog");
+    }
+  }, 60_000);
+
   // LLM exit advisor — interval always runs; the gate is inside tickLlmAdvisor()
   // so /llm can toggle at runtime without a restart.
   if (CONFIG.LLM_EXIT_ENABLED) {
@@ -144,6 +161,7 @@ async function main(): Promise<void> {
     stopServer();
     stopTelegram();
     clearInterval(tickInterval);
+    clearInterval(watchdogInterval);
     clearInterval(llmInterval);
     void Promise.allSettled([
         stopOkxWsService(),
