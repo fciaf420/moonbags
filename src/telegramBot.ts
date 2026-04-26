@@ -1550,6 +1550,30 @@ async function handlePing(chatId: number): Promise<void> {
     `• runtime: node ${process.version} · ${process.platform}/${process.arch}`,
   );
 
+  // Position tick health — detect stuck tick loop
+  const openPositions = getPositions().filter((p) => p.status === "open");
+  lines.push("");
+  lines.push("<b>Position tick health</b>");
+  if (openPositions.length === 0) {
+    lines.push("• no open positions");
+  } else {
+    const now = Date.now();
+    const staleCutoff = CONFIG.PRICE_POLL_MS * 3;
+    const lastTickAts = openPositions.map((p) => p.lastTickAt).filter((t) => t > 0);
+    const oldestTickAt = lastTickAts.length > 0 ? Math.min(...lastTickAts) : 0;
+    const mostRecentTickAt = lastTickAts.length > 0 ? Math.max(...lastTickAts) : 0;
+    const oldestAgo = oldestTickAt > 0 ? now - oldestTickAt : Infinity;
+    const recentAgo = mostRecentTickAt > 0 ? now - mostRecentTickAt : Infinity;
+    const stuck = oldestAgo > staleCutoff;
+    lines.push(`• open positions: ${openPositions.length}`);
+    lines.push(`• most recent tick: ${recentAgo === Infinity ? "never" : formatAgo(recentAgo)} ${stuck ? "⚠️" : "✅"}`);
+    lines.push(`• oldest unticked: ${oldestAgo === Infinity ? "never" : formatAgo(oldestAgo)} ${stuck ? "⚠️ tick loop may be stuck" : "✅"}`);
+    const stalePositions = openPositions.filter((p) => now - p.lastTickAt > staleCutoff);
+    for (const p of stalePositions) {
+      lines.push(`  ↳ <code>${escapeHtml(p.name)}</code> last ticked ${formatAgo(now - p.lastTickAt)}`);
+    }
+  }
+
   await tgPost("sendMessage", {
     chat_id: chatId,
     text: lines.join("\n"),
