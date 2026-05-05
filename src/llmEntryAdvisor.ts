@@ -13,7 +13,7 @@
 
 import logger from "./logger.js";
 import { CONFIG } from "./config.js";
-import type { ScgAlert } from "./types.js";
+import type { SignalAlert } from "./types.js";
 import type { JupAudit } from "./jupGate.js";
 
 const REQUEST_TIMEOUT_MS = 6_000;
@@ -58,7 +58,7 @@ export type EntryDecision = {
   reason: string;
 };
 
-function buildSnapshot(alert: ScgAlert, jupAudit: JupAudit | null): string {
+function buildSnapshot(alert: SignalAlert, jupAudit: JupAudit | null): string {
   const lines: string[] = [
     `token: ${alert.name} (${alert.mint.slice(0, 8)}...)`,
     `source: ${alert.source ?? "unknown"}`,
@@ -92,7 +92,7 @@ function buildSnapshot(alert: ScgAlert, jupAudit: JupAudit | null): string {
 }
 
 export async function consultEntry(
-  alert: ScgAlert,
+  alert: SignalAlert,
 ): Promise<EntryDecision> {
   const fallback: EntryDecision = { action: "enter", reason: "llm-entry timeout/error — defaulting to enter" };
 

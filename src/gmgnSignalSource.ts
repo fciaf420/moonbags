@@ -1,11 +1,11 @@
 import path from "node:path";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import logger from "./logger.js";
-import type { ScgAlert } from "./types.js";
+import type { SignalAlert } from "./types.js";
 import { checkSignalMintCooldown, markSignalMintAccepted } from "./sourceDedupe.js";
 import { getRuntimeSettings } from "./settingsStore.js";
 import { fetchJupAudit, passesJupGate, type JupGateConfig } from "./jupGate.js";
-import { isBlacklisted, isPaused, recordAlertEvent } from "./scgPoller.js";
+import { isBlacklisted, isPaused, recordAlertEvent } from "./privateSignalPoller.js";
 import {
   getMarketSignal,
   getMarketTrenches,
@@ -131,7 +131,7 @@ export type GmgnSignalCandidate = {
   isOnCurve: boolean;
   sourceMeta: Record<string, unknown>;
   raw: GmgnRow;
-  alert: ScgAlert;
+  alert: SignalAlert;
 };
 
 type GmgnWatchEntry = {
@@ -168,7 +168,7 @@ type GmgnSnapshot = {
 };
 
 type StartOptions = {
-  onAcceptedCandidate?: (alert: ScgAlert) => void | Promise<void>;
+  onAcceptedCandidate?: (alert: SignalAlert) => void | Promise<void>;
 };
 
 type GmgnStatus = {
@@ -211,7 +211,7 @@ const DEFAULT_SETTINGS: GmgnSettings = {
   enabled: true,
   pollMs: 30_000,
   mode: "watch",
-  sourceMode: "scg_only",
+  sourceMode: "private_only",
   chains: ["sol"],
   trending: {
     // [TRENDING-ENABLED 2026-04-22] /v1/market/rank returns full token
@@ -524,14 +524,14 @@ function scoreFromData(candidate: Partial<GmgnSignalCandidate>): number {
   return Math.max(0, Math.min(100, Math.round(score)));
 }
 
-function liqTrendFor(candidate: Partial<GmgnSignalCandidate>): ScgAlert["liq_trend"] {
+function liqTrendFor(candidate: Partial<GmgnSignalCandidate>): SignalAlert["liq_trend"] {
   const change = Math.max(candidate.change1h ?? 0, candidate.change5m ?? 0, candidate.change1m ?? 0);
   if (change > 0) return "rising";
   if (change < 0) return "falling";
   return "unknown";
 }
 
-function buildAlert(candidate: GmgnSignalCandidate): ScgAlert {
+function buildAlert(candidate: GmgnSignalCandidate): SignalAlert {
   const ageMins = Math.max(0, Math.floor((Date.now() - candidate.timestamp) / 60_000));
   return {
     mint: candidate.mint,
@@ -878,7 +878,10 @@ function hydrateWatchEntry(raw: unknown): GmgnWatchEntry | null {
 }
 
 async function loadState(): Promise<void> {
-  if (loaded) return;
+  if (loaded) {
+    if (watchlist.size > 0 || snapshots.length > 0) seeded = true;
+    return;
+  }
   loaded = true;
   try {
     const raw = await readFile(WATCHLIST_FILE, "utf8").catch(() => "");
@@ -915,6 +918,7 @@ async function loadState(): Promise<void> {
       if (!oldest) break;
       watchlist.delete(oldest.mint);
     }
+    if (watchlist.size > 0 || snapshots.length > 0) seeded = true;
     logger.info({ watchlist: watchlist.size, snapshots: snapshots.length }, "[gmgn-source] state restored");
   } catch (err) {
     logger.warn({ err: String(err) }, "[gmgn-source] state load failed");
@@ -1048,7 +1052,7 @@ function baseSeedFromRow(source: GmgnSourceKind, chain: GmgnChain, row: GmgnRow)
       rawId: getMaybeString(row.id),
     },
     raw: row,
-    alert: {} as ScgAlert,
+    alert: {} as SignalAlert,
   };
   candidate.score = scoreFromData(candidate);
   candidate.alert = buildAlert(candidate);
@@ -1112,7 +1116,7 @@ async function enrichSeed(seed: GmgnSignalCandidate): Promise<GmgnSignalCandidat
     // NOTE: GMGN's open API does not expose `rug_ratio`, `is_wash_trading`, or a
     // direct `creator_balance_rate` on the security endpoint. `rugRatio` and
     // `isWashTrading` filters below are effectively always-pass and are
-    // retained only so the shared ScgAlert type stays populated.
+    // retained only so the shared SignalAlert type stays populated.
     next.sourceMeta = {
       ...next.sourceMeta,
       security: securityObj,
@@ -1263,7 +1267,7 @@ async function fetchSeeds(settings: GmgnSettings): Promise<GmgnSignalCandidate[]
             isOnCurve: Boolean(meta.isOnCurve ?? false),
             sourceMeta: { ...meta, source: "watchlist" },
             raw: cloneRawRow(raw),
-            alert: {} as ScgAlert,
+            alert: {} as SignalAlert,
           };
           return candidate;
         })
@@ -1609,6 +1613,7 @@ async function runCycle(): Promise<void> {
 export function startGmgnSignalSource(options: StartOptions = {}): void {
   onAcceptedCandidate = options.onAcceptedCandidate;
   if (running) return;
+  if (watchlist.size > 0 || snapshots.length > 0) seeded = true;
   running = true;
   void runCycle();
 }

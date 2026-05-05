@@ -93,7 +93,7 @@ export function notifyBuy(args: {
   entryPrice: number;
   signature: string;
 }): Promise<void> {
-  const source = args.source ? args.source.toUpperCase() : "SCG";
+  const source = args.source ? args.source.toUpperCase() : "Private Feed";
   const wallets = typeof args.sourceMeta?.triggerWalletCount === "number"
     ? ` · ${args.sourceMeta.triggerWalletCount} wallets`
     : "";

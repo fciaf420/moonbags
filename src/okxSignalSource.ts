@@ -2,10 +2,10 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { CONFIG } from "./config.js";
 import logger from "./logger.js";
-import { isBlacklisted, isPaused, recordAlertEvent } from "./scgPoller.js";
+import { isBlacklisted, isPaused, recordAlertEvent } from "./privateSignalPoller.js";
 import { checkSignalMintCooldown, markSignalMintAccepted } from "./sourceDedupe.js";
 import { getRuntimeSettings, type SourceMode } from "./settingsStore.js";
-import type { ScgAlert } from "./types.js";
+import type { SignalAlert } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -57,7 +57,7 @@ export type OkxSignalStatus = {
 };
 
 type StartOptions = {
-  onAcceptedCandidate?: (alert: ScgAlert) => void | Promise<void>;
+  onAcceptedCandidate?: (alert: SignalAlert) => void | Promise<void>;
 };
 
 type SignalListRow = {
@@ -273,7 +273,7 @@ function reject(candidate: OkxSignalCandidate | null, reason: string): void {
   }
 }
 
-function candidateToAlert(candidate: OkxSignalCandidate): ScgAlert {
+function candidateToAlert(candidate: OkxSignalCandidate): SignalAlert {
   const ageMins = Math.max(0, Math.floor((Date.now() - candidate.timestamp) / 60_000));
   const score = Math.max(0, Math.min(100,
     50 + candidate.triggerWalletCount * 5 + Math.min(candidate.amountUsd / 1000, 25) - Math.min(candidate.soldRatioPercent / 2, 30),

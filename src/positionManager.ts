@@ -1,6 +1,6 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
-import type { Position, ScgAlert, SignalMeta } from "./types.js";
+import type { Position, SignalAlert, SignalMeta } from "./types.js";
 import { CONFIG, SOL_MINT } from "./config.js";
 import logger from "./logger.js";
 import { buyTokenWithSol, sellTokenForSol, getWalletTokenBalance, unwrapResidualWsol } from "./jupClient.js";
@@ -222,7 +222,7 @@ export async function getSignalStats(): Promise<SignalStats> {
 
   const sources = new Map<string, ClosedTrade[]>();
   for (const t of withMeta) {
-    const src = (t.signalMeta?.source ?? "scg").toLowerCase();
+    const src = (t.signalMeta?.source ?? "private").toLowerCase();
     const bucket = sources.get(src) ?? [];
     bucket.push(t);
     sources.set(src, bucket);
@@ -482,7 +482,7 @@ export function getStats(): {
   };
 }
 
-export async function openPosition(alert: ScgAlert): Promise<Position | null> {
+export async function openPosition(alert: SignalAlert): Promise<Position | null> {
   if (positions.size >= CONFIG.MAX_CONCURRENT_POSITIONS) {
     logger.info({ mint: alert.mint }, "capacity full, skipping");
     return null;
@@ -566,7 +566,7 @@ export async function openPosition(alert: ScgAlert): Promise<Position | null> {
       rug_ratio:    alert.rug_ratio,
       liq_trend:    alert.liq_trend,
       score:        alert.score,
-      source:       alert.source ?? "scg",
+      source:       alert.source ?? "private",
     },
   };
   positions.set(alert.mint, position);
@@ -589,7 +589,7 @@ export async function openPosition(alert: ScgAlert): Promise<Position | null> {
   void notifyBuy({
     name: alert.name,
     mint: alert.mint,
-    source: alert.source ?? "scg",
+    source: alert.source ?? "private",
     sourceMeta: alert.sourceMeta,
     solSpent: position.entrySolSpent,
     entryMcap: alert.alert_mcap,

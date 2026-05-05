@@ -13,12 +13,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-// [SCG-DISABLED 2026-04-22] SCG_URL import kept ONLY because `fetchScgTokens`
-// below references it and the user asked to leave that function body intact.
-// The default backtest source is now "gmgn"; nothing calls fetchScgTokens from
-// the default branching. Delete this import when fully retiring SCG.
-import { SCG_URL } from "./scgPoller.js";
-import type { ScgAlertsResponse } from "./types.js";
+import { CONFIG } from "./config.js";
+import type { SignalAlertsResponse } from "./types.js";
 import {
   getMarketSignal,
   getMarketTrenches,
@@ -41,8 +37,7 @@ const TOP_N       = parseInt(arg("--top", "15"));
 const TOKEN_LIMIT = parseInt(arg("--tokens", "0"));
 const MIN_CANDLES = parseInt(arg("--min-candles", "60"));   // ~5 hours of 5m data
 const STRATEGY    = arg("--strategy", "all");               // "all" | "simple" | "hybrid" | "protective"
-// [SCG-DISABLED 2026-04-22] CLI default flipped from "scg" to "gmgn".
-const SOURCE      = arg("--source", "gmgn");                // "scg" | "hot" | "gmgn" | "okx"
+const SOURCE      = arg("--source", "gmgn");                // "private" | "hot" | "gmgn" | "okx"
 const FEE_BPS     = parseInt(arg("--fee-bps", "50"));         // Ultra platform fee per swap (50 bps = 0.5%)
 const SLIPPAGE_BPS = parseInt(arg("--slippage-bps", "150"));  // estimated slippage per swap (150 bps = 1.5%)
 
@@ -76,8 +71,8 @@ const BAR_MS: Record<string, number> = {
   "1s": 1_000, "1m": 60_000, "5m": 300_000, "15m": 900_000,
   "30m": 1_800_000, "1H": 3_600_000, "4H": 14_400_000, "1D": 86_400_000,
 };
-const SCG_BAR_PRIORITY = ["5m", "15m", "1H"] as const;
-const SCG_MIN_RUNWAY_MS = 24 * 60 * 60 * 1000;
+const PRIVATE_SIGNAL_BAR_PRIORITY = ["5m", "15m", "1H"] as const;
+const PRIVATE_SIGNAL_MIN_RUNWAY_MS = 24 * 60 * 60 * 1000;
 const MIN_CANDLES_BY_BAR: Record<string, number> = {
   "1m": 240,
   "5m": 288,
@@ -96,7 +91,7 @@ interface TokenSample {
   alertTimeSec?: number;
   alertMcap?: number;
   impliedSupply?: number;
-  source: "scg" | "hot" | "gmgn" | "okx";
+  source: "private" | "hot" | "gmgn" | "okx";
 }
 interface CandleSample {
   symbol: string;
@@ -224,42 +219,47 @@ type OkxHotTokenRow = {
   firstTradeTime?: string;
 };
 
-// Backtest the same universe the live OKX discovery source uses:
-// `onchainos token hot-tokens --rank-by 5 --time-frame 1 --limit 100`
-// (volume-ranked top-100 SOL tokens, 5m window). Matches the live
-// bot — previously this fetched `signal list` (KOL events), a
-// different universe than what the live source now consumes.
+// Fetch OKX hot-tokens across all four time frames (5m, 1h, 4h, 24h) and
+// deduplicate by mint. Using only the 5m frame returns tokens born minutes ago
+// that have no OHLCV history; the broader sweep surfaces tokens that are still
+// hot after 24h+ and therefore have the candle runway the backtest needs.
+// Tokens without a firstTradeTime skip the runway check and just need minCandles.
 async function fetchOkxSignals(): Promise<TokenSample[]> {
-  const args = [
-    "token", "hot-tokens",
-    "--chain", "solana",
-    "--rank-by", "5",      // volume
-    "--time-frame", "1",   // 5m window (matches live discovery source)
-    "--limit", "100",
-  ];
-  const rows = await runOnchainosJson<OkxHotTokenRow[]>(args, 15_000).catch(() => null);
-  if (!rows || rows.length === 0) {
-    throw new Error(
-      "OKX hot-tokens returned no tokens. Check onchainos CLI auth and `onchainos token hot-tokens --chain solana --rank-by 5 --time-frame 1 --limit 1`.",
-    );
-  }
+  const TIME_FRAMES = ["1", "2", "3", "4"]; // 5m, 1h, 4h, 24h
   const seen = new Set<string>();
   const out: TokenSample[] = [];
-  for (const row of rows) {
-    const mint = row.tokenContractAddress ?? "";
-    if (!mint || seen.has(mint)) continue;
-    seen.add(mint);
-    const tsMs = Number(row.firstTradeTime);
-    const alertTimeSec = Number.isFinite(tsMs) && tsMs > 0
-      ? (tsMs > 1e12 ? Math.floor(tsMs / 1000) : Math.floor(tsMs))
-      : undefined;
-    out.push({
-      address: mint,
-      symbol: row.tokenSymbol ?? mint.slice(0, 6),
-      alertTimeSec,
-      alertMcap: Number(row.marketCap) || undefined,
-      source: "okx",
-    });
+
+  for (const tf of TIME_FRAMES) {
+    const rows = await runOnchainosJson<OkxHotTokenRow[]>([
+      "token", "hot-tokens",
+      "--chain", "solana",
+      "--rank-by", "5",
+      "--time-frame", tf,
+      "--limit", "100",
+    ], 15_000).catch(() => null);
+    if (!rows || rows.length === 0) continue;
+    for (const row of rows) {
+      const mint = row.tokenContractAddress ?? "";
+      if (!mint || seen.has(mint)) continue;
+      seen.add(mint);
+      const tsMs = Number(row.firstTradeTime);
+      const alertTimeSec = Number.isFinite(tsMs) && tsMs > 0
+        ? (tsMs > 1e12 ? Math.floor(tsMs / 1000) : Math.floor(tsMs))
+        : undefined;
+      out.push({
+        address: mint,
+        symbol: row.tokenSymbol ?? mint.slice(0, 6),
+        alertTimeSec,
+        alertMcap: Number(row.marketCap) || undefined,
+        source: "okx",
+      });
+    }
+  }
+
+  if (out.length === 0) {
+    throw new Error(
+      "OKX hot-tokens returned no tokens across all time frames. Check onchainos CLI auth and `onchainos token hot-tokens --chain solana --rank-by 5 --time-frame 4 --limit 1`.",
+    );
   }
   return out;
 }
@@ -313,12 +313,20 @@ async function fetchGmgnTokens(): Promise<TokenSample[]> {
   return tokens;
 }
 
-async function fetchScgTokens(): Promise<TokenSample[]> {
-  const res = await fetch(SCG_URL);
-  if (!res.ok) {
-    throw new Error(`SCG alerts failed: HTTP ${res.status} ${res.statusText}`);
+async function fetchPrivateTokens(): Promise<TokenSample[]> {
+  if (!CONFIG.PRIVATE_SIGNAL_API_URL || !CONFIG.PRIVATE_SIGNAL_API_KEY) {
+    throw new Error("Private Feed backtest requires PRIVATE_SIGNAL_API_URL and PRIVATE_SIGNAL_API_KEY in .env");
   }
-  const body = (await res.json()) as ScgAlertsResponse;
+  const res = await fetch(CONFIG.PRIVATE_SIGNAL_API_URL, {
+    headers: {
+      accept: "application/json",
+      authorization: `Bearer ${CONFIG.PRIVATE_SIGNAL_API_KEY}`,
+    },
+  });
+  if (!res.ok) {
+    throw new Error(`Private Feed alerts failed: HTTP ${res.status} ${res.statusText}`);
+  }
+  const body = (await res.json()) as SignalAlertsResponse;
   const alerts = Array.isArray(body?.alerts) ? body.alerts : [];
   const seen = new Set<string>();
   const tokens: TokenSample[] = [];
@@ -332,16 +340,16 @@ async function fetchScgTokens(): Promise<TokenSample[]> {
       alertTimeSec: alert.alert_time,
       alertMcap: alert.alert_mcap,
       impliedSupply: estimateSupplyFromAlert(alert),
-      source: "scg",
+      source: "private",
     });
   }
 
-  if (tokens.length === 0) throw new Error("SCG alerts returned no tokens");
-  await saveScgSnapshot(alerts).catch(() => undefined);
+  if (tokens.length === 0) throw new Error("Private Feed alerts returned no tokens");
+  await savePrivateSignalSnapshot(alerts).catch(() => undefined);
   return tokens;
 }
 
-function estimateSupplyFromAlert(alert: ScgAlertsResponse["alerts"][number]): number | undefined {
+function estimateSupplyFromAlert(alert: SignalAlertsResponse["alerts"][number]): number | undefined {
   const supplies = Object.values(alert.tracked_prices ?? {})
     .map((tracked) => tracked.price > 0 && tracked.mcap > 0 ? tracked.mcap / tracked.price : NaN)
     .filter((value) => Number.isFinite(value) && value > 0)
@@ -350,13 +358,13 @@ function estimateSupplyFromAlert(alert: ScgAlertsResponse["alerts"][number]): nu
   return supplies[Math.floor(supplies.length / 2)];
 }
 
-async function saveScgSnapshot(alerts: ScgAlertsResponse["alerts"]): Promise<void> {
+async function savePrivateSignalSnapshot(alerts: SignalAlertsResponse["alerts"]): Promise<void> {
   const dir = path.resolve("state", "backtests");
   await mkdir(dir, { recursive: true });
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   await writeFile(
-    path.join(dir, `scg-alerts-${timestamp}.json`),
-    JSON.stringify({ capturedAt: new Date().toISOString(), source: SCG_URL, alerts }, null, 2),
+    path.join(dir, `private-alerts-${timestamp}.json`),
+    JSON.stringify({ capturedAt: new Date().toISOString(), source: "private", alerts }, null, 2),
   );
 }
 
@@ -372,24 +380,24 @@ function candlesAfterAlert(candles: Candle[], alertTimeSec?: number): Candle[] {
 function hasRunway(candles: Candle[], alertTimeSec?: number): boolean {
   if (!alertTimeSec || !Number.isFinite(alertTimeSec)) return true;
   const lastTs = candles[candles.length - 1]?.ts;
-  return Boolean(lastTs && lastTs - alertTimeSec * 1000 >= SCG_MIN_RUNWAY_MS);
+  return Boolean(lastTs && lastTs - alertTimeSec * 1000 >= PRIVATE_SIGNAL_MIN_RUNWAY_MS);
 }
 
-function minCandlesForBar(bar: string, configuredMin: number, source: "scg" | "hot" | "gmgn" | "okx"): number {
-  if (source === "scg" || source === "gmgn" || source === "okx") return MIN_CANDLES_BY_BAR[bar] ?? configuredMin;
+function minCandlesForBar(bar: string, configuredMin: number, source: "private" | "hot" | "gmgn" | "okx"): number {
+  if (source === "private" || source === "gmgn" || source === "okx") return MIN_CANDLES_BY_BAR[bar] ?? configuredMin;
   return configuredMin;
 }
 
 async function fetchSampleCandles(token: TokenSample, preferredBar: string, configuredMin: number): Promise<CandleSample | null> {
   const hasAlertTime = Boolean(token.alertTimeSec && Number.isFinite(token.alertTimeSec));
-  if (token.source !== "scg" && !hasAlertTime) {
+  if (token.source !== "private" && !hasAlertTime) {
     const candles = await fetchKlines(token.address, preferredBar);
     return candles.length >= configuredMin
       ? { symbol: token.symbol, candles, bar: preferredBar, entrySource: "first_candle" }
       : null;
   }
 
-  const bars = Array.from(new Set([preferredBar, ...SCG_BAR_PRIORITY]));
+  const bars = Array.from(new Set([preferredBar, ...PRIVATE_SIGNAL_BAR_PRIORITY]));
   const eagerBars = bars.slice(0, 2);
   const eager = await Promise.all(eagerBars.map(async (bar) => ({ bar, candles: candlesAfterAlert(await fetchKlines(token.address, bar), token.alertTimeSec) })));
   for (const sample of eager) {
@@ -458,11 +466,11 @@ async function fetchKlines(address: string, bar: string = BAR): Promise<Candle[]
 
 // ---------------------------------------------------------------------------
 // Simulate one trade with given params.
-// Entry = SCG alert market cap when available, otherwise first candle open.
+// Entry = Private Feed alert market cap when available, otherwise first candle open.
 // Supports partial scale-out and moonbag.
 // ---------------------------------------------------------------------------
 // NOTE on entry timing:
-//   We don't replicate SCG's upstream filter (we don't know exactly what it is),
+//   We don't replicate Private Feed's upstream filter (we don't know exactly what it is),
 //   so we take all hot-tokens and enter each one at the oldest candle in the fetched
 //   window. This simulates "bot received some signal and entered; test forward from
 //   there." The hot-tokens bias (they already pumped) cuts the other way — if the
@@ -629,7 +637,7 @@ export interface RunBacktestOptions {
   mbTrailRange?: number[];    // moonbag's own drawdown trail. default [0.50, 0.60, 0.70]
   mbTimeoutRange?: number[];  // moonbag max hold, minutes. default [30, 60, 120]
   onProgress?: (stage: "fetching" | "simulating", pct: number) => void;
-  source?: "scg" | "hot" | "gmgn" | "okx";
+  source?: "private" | "hot" | "gmgn" | "okx";
   tokenLimit?: number;
 }
 
@@ -639,7 +647,7 @@ export interface RunBacktestResult {
   allResults: GridResult[];     // full grid, sorted best→worst
   topResults: GridResult[];     // top N slice for convenience
   bar: string;
-  source: "scg" | "hot" | "gmgn" | "okx";
+  source: "private" | "hot" | "gmgn" | "okx";
   resolutionCounts: Record<string, number>;
   entrySourceCounts: Record<string, number>;
   durationMs: number;
@@ -655,7 +663,6 @@ export async function runBacktest(opts: RunBacktestOptions = {}): Promise<RunBac
   const bar = opts.bar ?? "5m";
   const minCandles = opts.minCandles ?? 60;
   const topN = opts.topN ?? 10;
-  // [SCG-DISABLED 2026-04-22] Default flipped from "scg" to "gmgn".
   const source = opts.source ?? "gmgn";
   const armRange   = opts.armRange ?? ARM_RANGE;
   const trailRange = opts.trailRange ?? TRAIL_RANGE;
@@ -665,13 +672,10 @@ export async function runBacktest(opts: RunBacktestOptions = {}): Promise<RunBac
 
   // 1. Fetch hot tokens
   opts.onProgress?.("fetching", 0);
-  // [SCG-DISABLED 2026-04-22] SCG branch commented out of the default fetch path.
-  // fetchScgTokens stays defined above so this can be restored verbatim.
   const fetchedTokens =
-    // source === "scg"
-    //   ? await fetchScgTokens()
-    //   :
-    source === "gmgn"
+    source === "private"
+      ? await fetchPrivateTokens()
+      : source === "gmgn"
       ? await fetchGmgnTokens()
       : source === "okx"
         ? await fetchOkxSignals()
@@ -911,8 +915,7 @@ async function main(): Promise<void> {
       topN: TOP_N,
       minCandles: MIN_CANDLES,
       allStrategies: true,
-      // [SCG-DISABLED 2026-04-22] Non-hot default is now "gmgn" (was "scg").
-      source: SOURCE === "hot" ? "hot" : SOURCE === "scg" ? "scg" : "gmgn",
+      source: SOURCE === "hot" ? "hot" : SOURCE === "private" ? "private" : "gmgn",
       tokenLimit: TOKEN_LIMIT > 0 ? TOKEN_LIMIT : undefined,
     });
     const resolutionText = Object.entries(result.resolutionCounts).map(([bar, count]) => `${count} ${bar}`).join(" · ") || "none";

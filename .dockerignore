@@ -4,7 +4,6 @@ state/
 .git
 *.log
 dist/
-public/
 frontend/node_modules
 frontend/dist
 logs/

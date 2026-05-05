@@ -5,21 +5,33 @@ COPY frontend/package*.json ./
 RUN npm ci
 COPY frontend/ ./
 RUN npm run build
-# Output lands in /app/public (vite outDir: "../public")
+# vite outDir is "../public", so the build lands in /app/public
 
 # Stage 2 — runtime
 FROM node:20-alpine
 WORKDIR /app
 
-# Install backend dependencies
+RUN apk add --no-cache bash curl
+
 COPY package*.json ./
 RUN npm ci
 
-# Copy source and built frontend
 COPY src/ ./src/
 COPY tsconfig.json ./
 COPY --from=frontend-builder /app/public ./public/
 
 EXPOSE 8787
 
-CMD ["node", "--dns-result-order=ipv4first", "--import", "tsx", "src/main.ts"]
+# onchainos CLI is required at runtime for OKX discovery + WSS. Install on
+# first boot (and cache to /root/.local/bin via the npm script). The relay
+# role doesn't need onchainos, so it skips the install.
+ENV PATH="/root/.local/bin:${PATH}"
+CMD ["sh", "-c", "\
+  if [ \"$APP_ROLE\" = \"private-signal-relay\" ]; then \
+    exec npm run private-feed:relay; \
+  fi; \
+  if ! command -v onchainos >/dev/null 2>&1; then \
+    npm run install:onchainos || echo 'onchainos install failed — OKX discovery disabled'; \
+  fi; \
+  exec npm run start \
+"]

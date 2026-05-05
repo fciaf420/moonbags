@@ -1,12 +1,13 @@
 import { CONFIG } from "./config.js";
 import logger from "./logger.js";
-import type { ScgAlert, ScgAlertsResponse } from "./types.js";
+import type { SignalAlert, SignalAlertsResponse } from "./types.js";
 import { getRuntimeSettings } from "./settingsStore.js";
 import { checkSignalMintCooldown, markSignalMintAccepted } from "./sourceDedupe.js";
+import { readPrivateSignalAlerts } from "./privateSignalDb.js";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 
-export type AlertHandler = (alert: ScgAlert) => void | Promise<void>;
+export type AlertHandler = (alert: SignalAlert) => void | Promise<void>;
 
 export type AlertEvent = {
   at: number;
@@ -19,16 +20,15 @@ export type AlertEvent = {
   reason?: string;
 };
 
-export const SCG_URL = "https://api.scgalpha.com/api/alerts";
 const DEDUP_CAP = 5000;
 const RECENT_CAP = 200;
 
-export function alertKey(a: Pick<ScgAlert, "mint" | "alert_time">): string {
+export function alertKey(a: Pick<SignalAlert, "mint" | "alert_time">): string {
   return `${a.mint}:${a.alert_time}`;
 }
 
 // ---------------------------------------------------------------------------
-// Poller health — updated from inside startScgPoller's tick() so /ping can
+// Poller health — updated from inside startPrivateSignalPoller's tick() so /ping can
 // report whether the upstream is reachable and whether the poller is actually
 // processing what it receives. Readable via getPollerHealth() / hasSeenAlert().
 // ---------------------------------------------------------------------------
@@ -102,7 +102,7 @@ function persistPollerState(): void {
       const state: PollerState = { paused, blacklist: [...blacklist] };
       await writeFile(POLLER_STATE_FILE, JSON.stringify(state, null, 2));
     } catch (err) {
-      logger.error({ err: String(err) }, "[scgPoller] persist state failed");
+      logger.error({ err: String(err) }, "[privateSignalPoller] persist state failed");
     }
   }, 200);
   persistTimer.unref?.();
@@ -120,13 +120,13 @@ export async function loadPollerState(): Promise<void> {
     paused = Boolean(state.paused);
     blacklist.clear();
     for (const m of state.blacklist ?? []) blacklist.add(m);
-    logger.info({ paused, blacklistCount: blacklist.size }, "[scgPoller] state restored");
+    logger.info({ paused, blacklistCount: blacklist.size }, "[privateSignalPoller] state restored");
   } catch (err) {
     const e = err as NodeJS.ErrnoException;
     if (e.code === "ENOENT") {
-      logger.info("[scgPoller] no prior state — starting fresh (not paused, empty blacklist)");
+      logger.info("[privateSignalPoller] no prior state — starting fresh (not paused, empty blacklist)");
     } else {
-      logger.warn({ err: String(err) }, "[scgPoller] state load failed");
+      logger.warn({ err: String(err) }, "[privateSignalPoller] state load failed");
     }
   }
 }
@@ -138,11 +138,12 @@ export function addToBlacklist(mint: string): void { blacklist.add(mint); persis
 export function removeFromBlacklist(mint: string): void { blacklist.delete(mint); persistPollerState(); }
 export function isBlacklisted(mint: string): boolean { return blacklist.has(mint); }
 
-export function startScgPoller(onNew: AlertHandler): () => void {
+export function startPrivateSignalPoller(onNew: AlertHandler): () => void {
   const seen = new Set<string>();
   const seenOrder: string[] = [];
   let isRunning = false;
   let seeded = false;
+  let missingKeyWarned = false;
 
   pollerStartedAt = Date.now();
   seenRef = seen;
@@ -157,55 +158,121 @@ export function startScgPoller(onNew: AlertHandler): () => void {
     }
   }
 
-  function passesFilters(a: ScgAlert): { ok: boolean; reason?: string } {
-    if (CONFIG.MAX_ALERT_AGE_MINS > 0 && a.age_mins > CONFIG.MAX_ALERT_AGE_MINS) {
-      return { ok: false, reason: `age_mins ${a.age_mins} > ${CONFIG.MAX_ALERT_AGE_MINS}` };
+  function num(value: unknown, fallback = 0): number {
+    const parsed = typeof value === "number" ? value : Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+
+  function str(value: unknown, fallback = ""): string {
+    return typeof value === "string" && value.trim() ? value.trim() : fallback;
+  }
+
+  function optionalStr(value: unknown): string | undefined {
+    const out = str(value);
+    return out ? out : undefined;
+  }
+
+  function normalizeAlert(raw: unknown): SignalAlert | null {
+    if (!raw || typeof raw !== "object") return null;
+    const rec = raw as Record<string, unknown>;
+    const mint = str(rec.mint);
+    if (!mint) return null;
+    const alertMcap = num(rec.alert_mcap ?? rec.market_cap ?? rec.mcap);
+    const currentMcap = num(rec.current_mcap, alertMcap);
+    const maxMcap = num(rec.max_mcap, Math.max(alertMcap, currentMcap));
+    const score = num(rec.score);
+    return {
+      mint,
+      name: str(rec.name, mint.slice(0, 8)),
+      source: "private",
+      sourceMeta: {
+        is_safe: rec.is_safe,
+        is_smart: rec.is_smart,
+        scan_raw_at_alert: rec.scan_raw_at_alert,
+        raw: rec,
+      },
+      logo: optionalStr(rec.logo),
+      score,
+      alert_time: num(rec.alert_time, Math.floor(Date.now() / 1000)),
+      alert_mcap: alertMcap,
+      current_mcap: currentMcap,
+      return_pct: num(rec.return_pct),
+      max_return_pct: num(rec.max_return_pct),
+      max_mcap: maxMcap,
+      age_mins: num(rec.age_mins),
+      holders: num(rec.holders),
+      bs_ratio: num(rec.bs_ratio),
+      bot_degen_pct: num(rec.bot_degen_pct),
+      holder_growth_pct: num(rec.holder_growth_pct),
+      liquidity: num(rec.liquidity),
+      bundler_pct: num(rec.bundler_pct),
+      top10_pct: num(rec.top10_pct),
+      kol_count: num(rec.kol_count),
+      signal_count: num(rec.signal_count, num(rec.kol_count)),
+      degen_call_count: num(rec.degen_call_count),
+      rug_ratio: num(rec.rug_ratio),
+      twitter_handle: optionalStr(rec.twitter_handle),
+      twitter_followers: num(rec.twitter_followers),
+      liq_trend: str(rec.liq_trend, "unknown"),
+      tracked_prices: rec.tracked_prices && typeof rec.tracked_prices === "object"
+        ? rec.tracked_prices as SignalAlert["tracked_prices"]
+        : undefined,
+      completed: rec.completed === true,
+    };
+  }
+
+  async function fetchAlerts(): Promise<{ alerts: SignalAlert[]; httpStatus: number | null }> {
+    if (CONFIG.PRIVATE_SIGNAL_SOURCE === "postgres") {
+      const rows = await readPrivateSignalAlerts(250);
+      return {
+        alerts: rows.map(normalizeAlert).filter((alert): alert is SignalAlert => alert != null),
+        httpStatus: null,
+      };
     }
-    if (a.score < CONFIG.MIN_SCORE) {
-      return { ok: false, reason: `score ${a.score} < ${CONFIG.MIN_SCORE}` };
+    if (!CONFIG.PRIVATE_SIGNAL_API_URL || !CONFIG.PRIVATE_SIGNAL_API_KEY) {
+      throw new Error("missing PRIVATE_SIGNAL_API_URL or PRIVATE_SIGNAL_API_KEY");
     }
-    if (a.liquidity < CONFIG.MIN_LIQUIDITY_USD) {
-      return { ok: false, reason: `liquidity ${a.liquidity} < ${CONFIG.MIN_LIQUIDITY_USD}` };
+    const res = await fetch(CONFIG.PRIVATE_SIGNAL_API_URL, {
+      headers: {
+        accept: "application/json",
+        authorization: `Bearer ${CONFIG.PRIVATE_SIGNAL_API_KEY}`,
+      },
+    });
+    if (!res.ok) {
+      lastHttpStatus = res.status;
+      throw new Error(`HTTP ${res.status} ${res.statusText}`);
     }
-    if (CONFIG.MAX_RUG_RATIO > 0 && a.rug_ratio >= CONFIG.MAX_RUG_RATIO) {
-      return { ok: false, reason: `rug_ratio ${a.rug_ratio} >= ${CONFIG.MAX_RUG_RATIO}` };
-    }
-    if (CONFIG.MAX_BUNDLER_PCT > 0 && a.bundler_pct >= CONFIG.MAX_BUNDLER_PCT) {
-      return { ok: false, reason: `bundler_pct ${a.bundler_pct} >= ${CONFIG.MAX_BUNDLER_PCT}` };
-    }
-    if (CONFIG.MAX_TOP10_PCT > 0 && a.top10_pct >= CONFIG.MAX_TOP10_PCT) {
-      return { ok: false, reason: `top10_pct ${a.top10_pct} >= ${CONFIG.MAX_TOP10_PCT}` };
-    }
-    if (CONFIG.REQUIRE_RISING_LIQ && a.liq_trend !== "rising") {
-      return { ok: false, reason: `liq_trend ${a.liq_trend} !== rising` };
-    }
-    if (CONFIG.MIN_ALERT_MCAP > 0 && a.alert_mcap < CONFIG.MIN_ALERT_MCAP) {
-      return { ok: false, reason: `alert_mcap ${a.alert_mcap} < ${CONFIG.MIN_ALERT_MCAP}` };
-    }
-    if (CONFIG.MAX_ALERT_MCAP > 0 && a.alert_mcap > CONFIG.MAX_ALERT_MCAP) {
-      return { ok: false, reason: `alert_mcap ${a.alert_mcap} > ${CONFIG.MAX_ALERT_MCAP}` };
-    }
-    return { ok: true };
+    const body = (await res.json()) as SignalAlertsResponse;
+    return {
+      alerts: (Array.isArray(body?.alerts) ? body.alerts : [])
+        .map(normalizeAlert)
+        .filter((alert): alert is SignalAlert => alert != null),
+      httpStatus: res.status,
+    };
   }
 
   async function tick(): Promise<void> {
     if (isRunning) {
-      logger.debug("[scgPoller] previous tick still running, skipping");
+      logger.debug("[privateSignalPoller] previous tick still running, skipping");
       return;
     }
     isRunning = true;
     lastTickStartedAt = Date.now();
     try {
-      logger.debug("[scgPoller] polling");
-      const res = await fetch(SCG_URL);
-      lastHttpStatus = res.status;
-      if (!res.ok) {
-        lastTickError = `HTTP ${res.status} ${res.statusText}`;
-        logger.error({ status: res.status, statusText: res.statusText }, "[scgPoller] non-OK response");
+      if (CONFIG.PRIVATE_SIGNAL_SOURCE === "off") {
+        lastHttpStatus = null;
+        lastAlertCount = 0;
+        lastTickError = "Private Feed source disabled";
+        if (!missingKeyWarned) {
+          logger.warn("[privateSignalPoller] Private Feed source disabled");
+          missingKeyWarned = true;
+        }
         return;
       }
-      const body = (await res.json()) as ScgAlertsResponse;
-      const alerts = Array.isArray(body?.alerts) ? body.alerts : [];
+      missingKeyWarned = false;
+      logger.debug("[privateSignalPoller] polling");
+      const { alerts, httpStatus } = await fetchAlerts();
+      lastHttpStatus = httpStatus;
       lastAlertCount = alerts.length;
       lastTickError = null;
       lastTickOkAt = Date.now();
@@ -213,11 +280,11 @@ export function startScgPoller(onNew: AlertHandler): () => void {
       if (!seeded) {
         for (const a of alerts) remember(alertKey(a));
         seeded = true;
-        logger.debug({ count: alerts.length }, "[scgPoller] seeded dedup set on first poll");
+        logger.debug({ count: alerts.length }, "[privateSignalPoller] seeded dedup set on first poll");
         return;
       }
 
-      const fresh: ScgAlert[] = [];
+      const fresh: SignalAlert[] = [];
       for (const a of alerts) {
         const k = alertKey(a);
         if (seen.has(k)) continue;
@@ -228,7 +295,7 @@ export function startScgPoller(onNew: AlertHandler): () => void {
             at: Date.now(),
             mint: a.mint, name: a.name, score: a.score,
             age_mins: a.age_mins, liquidity: a.liquidity,
-            action: "filtered", reason: "SCG source disabled",
+            action: "filtered", reason: "Private Feed source disabled",
           });
           continue;
         }
@@ -250,21 +317,10 @@ export function startScgPoller(onNew: AlertHandler): () => void {
           });
           continue;
         }
-        const check = passesFilters(a);
-        if (!check.ok) {
-          logger.debug({ mint: a.mint, name: a.name, reason: check.reason }, "[scgPoller] filtered out");
-          recordEvent({
-            at: Date.now(),
-            mint: a.mint,
-            name: a.name,
-            score: a.score,
-            age_mins: a.age_mins,
-            liquidity: a.liquidity,
-            action: "filtered",
-            reason: check.reason,
-          });
-          continue;
-        }
+        // Private Feed is pre-filtered upstream — auto-accept any alert that
+        // passes pause/blacklist/sourceMode. We do still honor mint cooldown
+        // to prevent re-buying the same token if the relay re-emits it under
+        // a new alert_time.
         const cooldown = checkSignalMintCooldown(a.mint, settings.signals.okx.mintCooldownMins);
         if (!cooldown.ok) {
           recordEvent({
@@ -279,7 +335,7 @@ export function startScgPoller(onNew: AlertHandler): () => void {
           });
           continue;
         }
-        markSignalMintAccepted(a.mint, "scg");
+        markSignalMintAccepted(a.mint, "private");
         recordEvent({
           at: Date.now(),
           mint: a.mint,
@@ -298,18 +354,18 @@ export function startScgPoller(onNew: AlertHandler): () => void {
         fresh.map((a) => {
           logger.info(
             { mint: a.mint, name: a.name, score: a.score, age_mins: a.age_mins, liquidity: a.liquidity },
-            "[scgPoller] firing alert",
+            "[privateSignalPoller] firing alert",
           );
           return Promise.resolve()
             .then(() => onNew(a))
             .catch((err) => {
-              logger.error({ err, mint: a.mint }, "[scgPoller] handler error");
+              logger.error({ err, mint: a.mint }, "[privateSignalPoller] handler error");
             });
         }),
       );
     } catch (err) {
       lastTickError = (err as Error)?.message ?? String(err);
-      logger.error({ err }, "[scgPoller] poll failed");
+      logger.error({ err }, "[privateSignalPoller] poll failed");
     } finally {
       isRunning = false;
     }
@@ -317,7 +373,7 @@ export function startScgPoller(onNew: AlertHandler): () => void {
 
   const interval = setInterval(() => {
     void tick();
-  }, CONFIG.SCG_POLL_MS);
+  }, CONFIG.PRIVATE_SIGNAL_POLL_MS);
 
   void tick();
 

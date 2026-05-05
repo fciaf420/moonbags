@@ -51,15 +51,21 @@ function resolveRpcUrl(): string {
 }
 
 const DRY_RUN = bool("DRY_RUN", true);
+const APP_ROLE = str("APP_ROLE") ?? "bot";
 
 const JUP_API_KEY = str("JUP_API_KEY");
 const HELIUS_API_KEY = str("HELIUS_API_KEY");
 const PRIV_B58 = str("PRIV_B58");
+const PRIVATE_SIGNAL_API_URL = str("PRIVATE_SIGNAL_API_URL");
+const PRIVATE_SIGNAL_API_KEY = str("PRIVATE_SIGNAL_API_KEY");
+const DATABASE_URL = str("DATABASE_URL");
 
 const missing: string[] = [];
-if (!JUP_API_KEY) missing.push("JUP_API_KEY");
-if (!HELIUS_API_KEY) missing.push("HELIUS_API_KEY");
-if (!PRIV_B58) missing.push("PRIV_B58");
+if (APP_ROLE !== "private-signal-relay") {
+  if (!JUP_API_KEY) missing.push("JUP_API_KEY");
+  if (!HELIUS_API_KEY) missing.push("HELIUS_API_KEY");
+  if (!PRIV_B58) missing.push("PRIV_B58");
+}
 
 if (missing.length > 0) {
   if (DRY_RUN && missing.length === 1 && missing[0] === "PRIV_B58") {
@@ -80,9 +86,19 @@ if (missing.length > 0) {
 // API keys, wallet keys, and DRY_RUN are still NOT mutable via the in-process
 // updater (see SETTABLE_KEYS below). Trading edits are persisted by settingsStore.
 export const CONFIG = ({
+  APP_ROLE,
   JUP_API_KEY: JUP_API_KEY ?? "",
   HELIUS_API_KEY: HELIUS_API_KEY ?? "",
   PRIV_B58: PRIV_B58 ?? "",
+  DATABASE_URL: DATABASE_URL ?? "",
+  DATABASE_SSL: bool("DATABASE_SSL", true),
+  PRIVATE_SIGNAL_SOURCE: str("PRIVATE_SIGNAL_SOURCE") ?? (
+    DATABASE_URL
+      ? "postgres"
+      : (PRIVATE_SIGNAL_API_URL && PRIVATE_SIGNAL_API_KEY ? "direct" : "off")
+  ),
+  PRIVATE_SIGNAL_API_URL: PRIVATE_SIGNAL_API_URL ?? "",
+  PRIVATE_SIGNAL_API_KEY: PRIVATE_SIGNAL_API_KEY ?? "",
   RPC_URL: resolveRpcUrl(),
   BUY_SIZE_SOL: num("BUY_SIZE_SOL", 0.02),
   MAX_CONCURRENT_POSITIONS: num("MAX_CONCURRENT_POSITIONS", 10),
@@ -90,22 +106,15 @@ export const CONFIG = ({
   TRAIL_PCT: num("TRAIL_PCT", 0.55),
   STOP_PCT: num("STOP_PCT", 0.4),
   MAX_HOLD_SECS: num("MAX_HOLD_SECS", 99_999_999_999_999_999),
-  MAX_ALERT_AGE_MINS: num("MAX_ALERT_AGE_MINS", 0),
-  MIN_LIQUIDITY_USD: num("MIN_LIQUIDITY_USD", 0),
-  MIN_SCORE: num("MIN_SCORE", 0),
-  MAX_RUG_RATIO: num("MAX_RUG_RATIO", 0),
-  MAX_BUNDLER_PCT: num("MAX_BUNDLER_PCT", 0),
-  MAX_TOP10_PCT: num("MAX_TOP10_PCT", 0),
   MIN_ALERT_MCAP: num("MIN_ALERT_MCAP", 0),
   MAX_ALERT_MCAP: num("MAX_ALERT_MCAP", 0),
-  REQUIRE_RISING_LIQ: bool("REQUIRE_RISING_LIQ", false),
-  SCG_POLL_MS: num("SCG_POLL_MS", 3000),
+  PRIVATE_SIGNAL_POLL_MS: num("PRIVATE_SIGNAL_POLL_MS", 3000),
   PRICE_POLL_MS: num("PRICE_POLL_MS", 2000),
   SLIPPAGE_BPS: num("SLIPPAGE_BPS", 0), // unused with Ultra (automatic slippage via RTSE)
   MOONBAG_PCT: num("MOONBAG_PCT", 0),
   MB_TRAIL_PCT: num("MB_TRAIL_PCT", 0.60),
   MB_TIMEOUT_SECS: num("MB_TIMEOUT_SECS", 7200),
-  DASHBOARD_PORT: num("DASHBOARD_PORT", 8787),
+  DASHBOARD_PORT: num("DASHBOARD_PORT", num("PORT", 8787)),
   TELEGRAM_BOT_TOKEN: str("TELEGRAM_BOT_TOKEN") ?? "",
   TELEGRAM_CHAT_ID: str("TELEGRAM_CHAT_ID") ?? "",
   LLM_EXIT_ENABLED: bool("LLM_EXIT_ENABLED", false),

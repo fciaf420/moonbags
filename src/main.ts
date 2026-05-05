@@ -3,10 +3,7 @@
 import dns from "dns";
 dns.setDefaultResultOrder("ipv4first");
 
-// [SCG-DISABLED 2026-04-22] SCG polling retired — keeping OKX + GMGN only.
-// Preserving import so scgPoller state (dedupe set, blacklist, etc.) still loads
-// for historical telegram views; `startScgPoller` stays imported but unused below.
-import { startScgPoller, loadPollerState } from "./scgPoller.js";
+import { startPrivateSignalPoller, loadPollerState } from "./privateSignalPoller.js";
 import { openPosition, tickPositions, tickLlmAdvisor, tickLlmHeartbeat, getPositions, loadPersistedPositions } from "./positionManager.js";
 import { startServer } from "./server.js";
 import { startTelegramBot } from "./telegramBot.js";
@@ -14,7 +11,7 @@ import { notifyBoot } from "./notifier.js";
 import { unwrapResidualWsol } from "./jupClient.js";
 import { startOkxWsService, stopOkxWsService, watchOkxWsMint } from "./okxWsService.js";
 // [OKX-KOL-RETIRED 2026-04-22] The KOL signal source (src/okxSignalSource.ts)
-// is kept on disk but no longer started. It is replaced by the SCG-alpha-style
+// is kept on disk but no longer started. It is replaced by the private-feed-style
 // discovery source wired in below. Re-enable by restoring the start call.
 import { stopOkxSignalSource } from "./okxSignalSource.js";
 import { startOkxDiscoverySource, stopOkxDiscoverySource } from "./okxDiscoverySource.js";
@@ -105,16 +102,13 @@ async function main(): Promise<void> {
   const stopTelegram = startTelegramBot();
   void notifyBoot();
 
-  // [SCG-DISABLED 2026-04-22] SCG poller no longer starts. OKX + GMGN sources above
-  // are the only live signal producers. Re-enable by uncommenting this block.
-  // const stopPoller = startScgPoller(async (alert) => {
-  //   try {
-  //     await openPosition(alert);
-  //   } catch (e) {
-  //     logger.error({ err: String(e), mint: alert.mint }, "openPosition crashed");
-  //   }
-  // });
-  const stopPoller = (): void => { /* [SCG-DISABLED 2026-04-22] no-op shim */ };
+  const stopPoller = startPrivateSignalPoller(async (alert) => {
+    try {
+      await openPosition(alert);
+    } catch (e) {
+      logger.error({ err: String(e), mint: alert.mint }, "openPosition crashed for Private Feed alert");
+    }
+  });
 
   const tickInterval = setInterval(() => {
     requestPositionTick("interval");

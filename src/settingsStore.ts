@@ -7,7 +7,7 @@ const STATE_DIR = path.resolve("state");
 const SETTINGS_FILE = path.join(STATE_DIR, "settings.json");
 
 export type ExitStrategyMode = "trail" | "fixed_tp" | "tp_ladder" | "llm_managed";
-export type SourceMode = "scg_only" | "okx_watch" | "hybrid" | "okx_only" | "gmgn_watch" | "gmgn_live" | "gmgn_only";
+export type SourceMode = "private_only" | "okx_watch" | "hybrid" | "okx_only" | "gmgn_watch" | "gmgn_live" | "gmgn_only";
 
 export type TpTarget = {
   pnlPct: number;  // decimal, e.g. 0.5 = +50%
@@ -63,7 +63,7 @@ export type RuntimeSettings = {
         walletTypes: number[];
         minAmountUsd: number;
       };
-      // [OKX-DISCOVERY 2026-04-22] SCG-alpha-style discovery source config —
+      // [OKX-DISCOVERY 2026-04-22] private-feed-style discovery source config —
       // consumed by src/okxDiscoverySource.ts. Mirrors signals.gmgn shape so
       // the /sources UI can render both sources uniformly.
       discovery: {
@@ -151,9 +151,9 @@ export const EXIT_STRATEGY_LABELS: Record<ExitStrategyMode, string> = {
 };
 
 export const SOURCE_MODE_LABELS: Record<SourceMode, string> = {
-  scg_only: "SCG only",
+  private_only: "Private Feed only",
   okx_watch: "OKX Watch",
-  hybrid: "Hybrid (OKX + GMGN live)",
+  hybrid: "Hybrid (Private Feed + OKX + GMGN live)",
   okx_only: "OKX only",
   gmgn_watch: "GMGN Watch",
   gmgn_live: "GMGN Live",
@@ -208,10 +208,7 @@ function defaultSettings(): RuntimeSettings {
       mcapMax: CONFIG.MAX_ALERT_MCAP,
     },
     signals: {
-      // [SCG-DISABLED 2026-04-22] Default flipped from "scg_only" to "gmgn_watch"
-      // since SCG polling is off. Pick "okx_watch" or "gmgn_watch" — both are conservative
-      // (watch-only, no auto-buy until you flip enabled). Change back to "scg_only"
-      // when re-enabling SCG.
+      // Conservative boot default: watch GMGN without auto-buy until /sources is set.
       sourceMode: "gmgn_watch",
       okx: {
         enabled: false,
@@ -402,7 +399,7 @@ function normalizeSettings(raw: unknown): RuntimeSettings {
     rawSourceMode === "gmgn_watch" ||
     rawSourceMode === "gmgn_live" ||
     rawSourceMode === "gmgn_only" ||
-    rawSourceMode === "scg_only"
+    rawSourceMode === "private_only"
       ? rawSourceMode
       : defaults.signals.sourceMode;
 
@@ -490,7 +487,7 @@ function normalizeSettings(raw: unknown): RuntimeSettings {
         },
       },
       gmgn: {
-        enabled: bool(gmgnSignals.enabled, sourceMode === "gmgn_watch" || sourceMode === "gmgn_live" || sourceMode === "gmgn_only"),
+        enabled: bool(gmgnSignals.enabled, sourceMode === "gmgn_watch" || sourceMode === "gmgn_live" || sourceMode === "gmgn_only" || sourceMode === "hybrid"),
         pollMs: Math.round(num(gmgnSignals.pollMs, defaults.signals.gmgn.pollMs, 15_000, 600_000)),
         mintCooldownMins: num(gmgnSignals.mintCooldownMins, defaults.signals.gmgn.mintCooldownMins, 0, 1440),
         watchlistTtlMins: num(gmgnSignals.watchlistTtlMins, defaults.signals.gmgn.watchlistTtlMins, 5, 1440),

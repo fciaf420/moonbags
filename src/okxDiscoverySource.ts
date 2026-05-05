@@ -1,7 +1,7 @@
 /**
  * OKX discovery signal source.
  *
- * SCG-alpha-style pipeline modeled on src/gmgnSignalSource.ts:
+ * private-feed-style pipeline modeled on src/gmgnSignalSource.ts:
  *   1. Seed: `onchainos token hot-tokens --chain solana --rank-by 5 --time-frame 1 --limit 100`
  *      (volume-ranked 5m window, top 100). Polled every 30s.
  *   2. Track: survivors land in a watchlist. A candidate must be seen across
@@ -11,8 +11,8 @@
  *      backfill top10HoldPercent, bundleHoldingPercent, sniperHoldingPercent,
  *      devHoldingPercent on a per-token basis. Best-effort merge from
  *      `onchainos memepump token-bundle-info` when cheap.
- *   4. Alert: emit a normalized ScgAlert via `onAcceptedCandidate` so
- *      positionManager picks it up the same way it handles SCG/OKX/GMGN alerts.
+ *   4. Alert: emit a normalized SignalAlert via `onAcceptedCandidate` so
+ *      positionManager picks it up the same way it handles Private Feed/OKX/GMGN alerts.
  *
  * See gmgnSignalSource.ts for the architectural blueprint.
  */
@@ -22,11 +22,11 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import logger from "./logger.js";
-import type { ScgAlert } from "./types.js";
+import type { SignalAlert } from "./types.js";
 import { checkSignalMintCooldown, markSignalMintAccepted } from "./sourceDedupe.js";
 import { getRuntimeSettings } from "./settingsStore.js";
 import { fetchJupAudit, passesJupGate } from "./jupGate.js";
-import { isBlacklisted, isPaused, recordAlertEvent } from "./scgPoller.js";
+import { isBlacklisted, isPaused, recordAlertEvent } from "./privateSignalPoller.js";
 import {
   getMaybeBool,
   getMaybeNumber,
@@ -98,7 +98,7 @@ export type OkxDiscoveryCandidate = {
   isWashTrading: boolean;
   sourceMeta: Record<string, unknown>;
   raw: OkxRow;
-  alert: ScgAlert;
+  alert: SignalAlert;
 };
 
 type OkxWatchEntry = {
@@ -137,7 +137,7 @@ type OkxSnapshot = {
 };
 
 type StartOptions = {
-  onAcceptedCandidate?: (alert: ScgAlert) => void | Promise<void>;
+  onAcceptedCandidate?: (alert: SignalAlert) => void | Promise<void>;
 };
 
 type OkxDiscoveryStatus = {
@@ -381,14 +381,14 @@ function scoreFromData(candidate: Partial<OkxDiscoveryCandidate>): number {
   return Math.max(0, Math.min(100, Math.round(score)));
 }
 
-function liqTrendFor(candidate: Partial<OkxDiscoveryCandidate>): ScgAlert["liq_trend"] {
+function liqTrendFor(candidate: Partial<OkxDiscoveryCandidate>): SignalAlert["liq_trend"] {
   const change = candidate.changePct ?? 0;
   if (change > 0) return "rising";
   if (change < 0) return "falling";
   return "unknown";
 }
 
-function buildAlert(candidate: OkxDiscoveryCandidate): ScgAlert {
+function buildAlert(candidate: OkxDiscoveryCandidate): SignalAlert {
   const ageMins = Math.max(0, Math.floor((Date.now() - candidate.timestamp) / 60_000));
   const bsRatio = candidate.txsSell > 0 ? candidate.txsBuy / candidate.txsSell : candidate.txsBuy > 0 ? 2 : 0;
   return {
@@ -511,7 +511,7 @@ function baseSeedFromRow(row: OkxRow): OkxDiscoveryCandidate | null {
       rankBy: getStringField(row, ["rankBy"]) ?? undefined,
     },
     raw: row,
-    alert: {} as ScgAlert,
+    alert: {} as SignalAlert,
   };
   candidate.score = scoreFromData(candidate);
   candidate.alert = buildAlert(candidate);
@@ -976,7 +976,7 @@ async function deepDiveCandidate(seed: OkxDiscoveryCandidate): Promise<OkxDeepDi
 
   // rug_ratio / is_wash_trading are not directly exposed by advanced-info;
   // we use the fields that ARE exposed to fail-safe. Keep the filter slots
-  // populated so the ScgAlert shape stays consistent downstream.
+  // populated so the SignalAlert shape stays consistent downstream.
   const rug = getMaybeNumber(advanced.rug_ratio);
   if (rug !== undefined && rug > next.rugRatio) next.rugRatio = rug;
 

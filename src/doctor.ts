@@ -126,21 +126,26 @@ function checkSourceMode(env: EnvMap): DoctorCheck | null {
   }
   if (!sourceMode) return null;
 
-  if (sourceMode === "scg_only") {
-    return {
-      id: "runtime:sourceMode",
-      label: "Source mode",
-      status: "warn",
-      detail: `sourceMode="scg_only" (SCG is disabled — bot will fire zero buys)`,
-      fix: "Open /sources in Telegram and pick okx_only / okx_watch / gmgn_watch / gmgn_live / gmgn_only / hybrid.",
-    };
-  }
-
   const needsOkx = ["okx_only", "okx_watch", "hybrid"].includes(sourceMode);
   const needsGmgn = ["gmgn_only", "gmgn_live", "gmgn_watch", "hybrid"].includes(sourceMode);
+  const needsPrivateFeed = ["private_only", "okx_watch", "gmgn_watch", "gmgn_live", "hybrid"].includes(sourceMode);
   const hasOkx = hasValue(env, "OKX_API_KEY") && hasValue(env, "OKX_SECRET_KEY") &&
     (hasValue(env, "OKX_PASSPHRASE") || hasValue(env, "OKX_API_PASSPHRASE"));
   const hasGmgn = hasValue(env, "GMGN_API_KEY");
+  const privateSource = env.PRIVATE_SIGNAL_SOURCE?.trim() || (hasValue(env, "DATABASE_URL") ? "postgres" : "direct");
+  const hasPrivateDirect = hasValue(env, "PRIVATE_SIGNAL_API_URL") && hasValue(env, "PRIVATE_SIGNAL_API_KEY");
+  const hasPrivatePostgres = hasValue(env, "DATABASE_URL");
+  const hasPrivateFeed = privateSource === "postgres" ? hasPrivatePostgres : hasPrivateDirect;
+
+  if (sourceMode === "private_only" && !hasPrivateFeed) {
+    return {
+      id: "runtime:sourceMode",
+      label: "Source mode",
+      status: "fail",
+      detail: `sourceMode="private_only" requires a configured Private Feed`,
+      fix: "Set PRIVATE_SIGNAL_SOURCE=postgres with DATABASE_URL, or set PRIVATE_SIGNAL_API_URL + PRIVATE_SIGNAL_API_KEY.",
+    };
+  }
 
   if (needsOkx && !hasOkx) {
     return {
@@ -158,6 +163,15 @@ function checkSourceMode(env: EnvMap): DoctorCheck | null {
       status: "fail",
       detail: `sourceMode="${sourceMode}" requires GMGN_API_KEY`,
       fix: "Add GMGN_API_KEY to .env (get one at https://gmgn.ai/ai?chain=sol) or switch to an OKX-only mode.",
+    };
+  }
+  if (needsPrivateFeed && !hasPrivateFeed) {
+    return {
+      id: "runtime:sourceMode",
+      label: "Source mode",
+      status: "warn",
+      detail: `sourceMode="${sourceMode}" can use Private Feed but it is not configured`,
+      fix: "Set PRIVATE_SIGNAL_SOURCE=postgres with DATABASE_URL, or set PRIVATE_SIGNAL_API_URL + PRIVATE_SIGNAL_API_KEY.",
     };
   }
 
@@ -250,6 +264,18 @@ function checkEnvVars(env: EnvMap): DoctorCheck[] {
     fix: gmgnSet ? undefined : "Create a GMGN API key at https://gmgn.ai/ai?chain=sol and add GMGN_API_KEY to .env.",
   });
 
+  const privateSource = env.PRIVATE_SIGNAL_SOURCE?.trim() || (hasValue(env, "DATABASE_URL") ? "postgres" : "direct");
+  const privateDirectSet = hasValue(env, "PRIVATE_SIGNAL_API_URL") && hasValue(env, "PRIVATE_SIGNAL_API_KEY");
+  const privatePostgresSet = hasValue(env, "DATABASE_URL");
+  const privateSet = privateSource === "postgres" ? privatePostgresSet : privateDirectSet;
+  checks.push({
+    id: "env:private",
+    label: "Private Feed",
+    status: privateSet ? "ok" : "warn",
+    detail: privateSet ? `${privateSource} configured` : "not configured (Private Feed source disabled)",
+    fix: privateSet ? undefined : "Set PRIVATE_SIGNAL_SOURCE=postgres with DATABASE_URL, or set PRIVATE_SIGNAL_API_URL + PRIVATE_SIGNAL_API_KEY.",
+  });
+
   const telegramSet = hasValue(env, "TELEGRAM_BOT_TOKEN") && hasValue(env, "TELEGRAM_CHAT_ID");
   checks.push({
     id: "env:telegram",
@@ -258,55 +284,6 @@ function checkEnvVars(env: EnvMap): DoctorCheck[] {
     detail: telegramSet ? "set" : "missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID",
     fix: telegramSet ? undefined : "Run npm run setup after creating a bot with @BotFather.",
   });
-
-  const numericFilters = [
-    "MAX_ALERT_AGE_MINS",
-    "MIN_LIQUIDITY_USD",
-    "MIN_SCORE",
-    "MAX_RUG_RATIO",
-    "MAX_BUNDLER_PCT",
-    "MAX_TOP10_PCT",
-  ];
-  const invalidFilters = numericFilters.filter((key) => hasValue(env, key) && envNumber(env, key) === null);
-  if (invalidFilters.length > 0) {
-    checks.push({
-      id: "env:alert_filters",
-      label: "Entry alert filters",
-      status: "fail",
-      detail: `invalid numeric filter values: ${invalidFilters.join(", ")}`,
-      fix: "Use numbers for alert filters. Set them to 0 to disable filtering.",
-    });
-  } else {
-    const enabledFilters = numericFilters
-      .map((key) => [key, envNumber(env, key)] as const)
-      .filter(([, value]) => value !== null && value > 0)
-      .map(([key, value]) => `${key}=${value}`);
-    const risingLiq = envBool(env, "REQUIRE_RISING_LIQ");
-    if (risingLiq === null && hasValue(env, "REQUIRE_RISING_LIQ")) {
-      checks.push({
-        id: "env:alert_filters_bool",
-        label: "Entry alert filters",
-        status: "fail",
-        detail: "invalid REQUIRE_RISING_LIQ value",
-        fix: "Set REQUIRE_RISING_LIQ=true or false.",
-      });
-    } else if (enabledFilters.length > 0 || risingLiq === true) {
-      checks.push({
-        id: "env:alert_filters",
-        label: "SCG-era alert filters (legacy)",
-        status: "warn",
-        detail: [...enabledFilters, ...(risingLiq === true ? ["REQUIRE_RISING_LIQ=true"] : [])].join(", "),
-        fix: "These env filters only affect the dormant SCG path. Safe to clear from .env. OKX/GMGN use /mcapfilter + sources-menu settings instead.",
-      });
-    } else {
-      checks.push({
-        id: "env:alert_filters",
-        label: "SCG-era alert filters (legacy)",
-        status: "ok",
-        detail: "unset (SCG is disabled; OKX/GMGN use /mcapfilter + /sources)",
-      });
-    }
-  }
 
   return checks;
 }
@@ -445,6 +422,22 @@ export async function runDoctor(options: { network?: boolean } = {}): Promise<Do
         status: gmgn.ok ? "ok" : "warn",
         detail: gmgn.detail,
         fix: gmgn.ok ? undefined : "Verify GMGN_API_KEY is valid and not rate-limit-banned. Check openapi.gmgn.ai reachability.",
+      });
+    }
+
+    if ((env.PRIVATE_SIGNAL_SOURCE?.trim() || "direct") !== "postgres" && hasValue(env, "PRIVATE_SIGNAL_API_URL") && hasValue(env, "PRIVATE_SIGNAL_API_KEY")) {
+      const privateFeed = await fetchOk(env.PRIVATE_SIGNAL_API_URL!.trim(), {
+        headers: {
+          accept: "application/json",
+          authorization: `Bearer ${env.PRIVATE_SIGNAL_API_KEY!.trim()}`,
+        },
+      });
+      checks.push({
+        id: "network:private",
+        label: "Private Feed API",
+        status: privateFeed.ok ? "ok" : "warn",
+        detail: privateFeed.detail,
+        fix: privateFeed.ok ? undefined : "Verify PRIVATE_SIGNAL_API_URL and PRIVATE_SIGNAL_API_KEY are valid.",
       });
     }
 

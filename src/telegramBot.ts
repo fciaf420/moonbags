@@ -12,9 +12,7 @@ import {
   getRecentAlertEvents,
   hasSeenAlert,
   alertKey,
-  SCG_URL,
-} from "./scgPoller.js";
-import type { ScgAlertsResponse } from "./types.js";
+} from "./privateSignalPoller.js";
 import { getPositionSnapshot } from "./okxClient.js";
 import { getOkxWsStatus, unwatchOkxWsMint, watchOkxWsMint } from "./okxWsService.js";
 import { escapeHtml } from "./notifier.js";
@@ -86,10 +84,8 @@ const BACKTEST_LADDER_PRESETS: Record<string, BacktestTpTarget[]> = {
   runner: [{ pnlPct: 0.50, sellPct: 0.25 }, { pnlPct: 1.00, sellPct: 0.25 }, { pnlPct: 2.00, sellPct: 0.25 }],
 };
 
-// [SCG-DISABLED 2026-04-22] "scg_only" removed from active SOURCE_MODES so the
-// telegram UI no longer offers it. Restore the scg_only entry when re-enabling SCG.
-const SOURCE_MODES: SourceMode[] = [/* "scg_only", */ "okx_watch", "hybrid", "okx_only", "gmgn_watch", "gmgn_live", "gmgn_only"];
-// [OKX-KOL-RETIRED 2026-04-22] /sources now reads from the SCG-alpha-style
+const SOURCE_MODES: SourceMode[] = ["private_only", "okx_watch", "hybrid", "okx_only", "gmgn_watch", "gmgn_live", "gmgn_only"];
+// [OKX-KOL-RETIRED 2026-04-22] /sources now reads from the private-feed-style
 // discovery source (src/okxDiscoverySource.ts) instead of the legacy KOL
 // signal source. Swap this module path back to "./okxSignalSource.js" and
 // point the accessors at get/refresh OkxSignalSource to restore the old view.
@@ -1095,7 +1091,7 @@ async function handlePause(chatId: number): Promise<void> {
   logger.info("[telegram] bot paused via /pause");
   await tgPost("sendMessage", {
     chat_id: chatId,
-    text: "⏸ <b>Paused</b> — new SCG/OKX/GMGN alerts will be ignored.\nOpen positions keep running.\nUse /resume to resume.",
+    text: "⏸ <b>Paused</b> — new Private Feed/OKX/GMGN alerts will be ignored.\nOpen positions keep running.\nUse /resume to resume.",
     parse_mode: "HTML",
   });
 }
@@ -1371,11 +1367,10 @@ function sourceModeKeyboard(current: SourceMode): Array<Array<{ text: string; ca
     callback_data: `sources:mode:${mode}`,
   });
   return [
-    // [SCG-DISABLED 2026-04-22] scg_only button hidden; re-enable alongside SOURCE_MODES.
-    // [button("scg_only"), button("okx_watch")],
-    [button("okx_watch"), button("hybrid")],
-    [button("okx_only"), button("gmgn_watch")],
-    [button("gmgn_live"), button("gmgn_only")],
+    [button("private_only"), button("hybrid")],
+    [button("okx_watch"), button("gmgn_watch")],
+    [button("okx_only"), button("gmgn_live")],
+    [button("gmgn_only")],
     [{ text: "🔄 Refresh", callback_data: "sources:refresh" }],
   ];
 }
@@ -1390,17 +1385,13 @@ async function sendSourcesMenu(chatId: number): Promise<void> {
   const filtered = recent.filter((e) => e.action === "filtered").length;
   const latest = recent[recent.length - 1];
   const lastRejected = [...recent].reverse().find((e) => e.action === "filtered" && e.reason);
-  // [SCG-DISABLED 2026-04-22] scgState/health/recent/filtered/fired/latest/lastRejected
-  // are still computed but not rendered in the sources menu while SCG is off.
-  // Uncomment the "SCG Alpha" lines block below to restore.
-  void isPaused; void health; void recent; void fired; void filtered; void latest; void lastRejected; void now;
-  // const scgState = isPaused()
-  //   ? "paused"
-  //   : health.lastTickError
-  //     ? "error"
-  //     : health.lastTickOkAt
-  //       ? "polling"
-  //       : "starting";
+  const privateFeedState = isPaused()
+    ? "paused"
+    : health.lastTickError
+      ? "error"
+      : health.lastTickOkAt
+        ? "polling"
+        : "starting";
   const okxStatus = await getSafeOkxSignalStatus();
   const gmgnStatus = await getSafeGmgnSignalStatus();
 
@@ -1409,13 +1400,12 @@ async function sendSourcesMenu(chatId: number): Promise<void> {
     "",
     `Active mode: <b>${SOURCE_MODE_LABELS[sourceMode]}</b> <code>${sourceMode}</code>`,
     "",
-    // [SCG-DISABLED 2026-04-22] SCG Alpha section hidden. Restore when re-enabling SCG.
-    // "<b>SCG Alpha</b>",
-    // `• status: ${scgState} · last poll ${health.lastTickOkAt ? formatAgo(now - health.lastTickOkAt) : "never"} · HTTP ${health.lastHttpStatus ?? "—"}`,
-    // `• counts: seen ${health.seenSize.toLocaleString("en-US")} · filtered ${filtered.toLocaleString("en-US")} · accepted ${fired.toLocaleString("en-US")} (recent ${recent.length})`,
-    // `• latest candidate: ${latest ? `<code>${escapeHtml(latest.name)}</code> · ${latest.action}${latest.reason ? ` · ${escapeHtml(latest.reason)}` : ""}` : "—"}`,
-    // `• last rejection: ${lastRejected?.reason ? `<code>${escapeHtml(lastRejected.reason)}</code>` : "—"}`,
-    // "",
+    "<b>Private Feed</b>",
+    `• status: ${privateFeedState} · last poll ${health.lastTickOkAt ? formatAgo(now - health.lastTickOkAt) : "never"} · HTTP ${health.lastHttpStatus ?? "—"}`,
+    `• counts: seen ${health.seenSize.toLocaleString("en-US")} · filtered ${filtered.toLocaleString("en-US")} · accepted ${fired.toLocaleString("en-US")} (recent ${recent.length})`,
+    `• latest candidate: ${latest ? `<code>${escapeHtml(latest.name)}</code> · ${latest.action}${latest.reason ? ` · ${escapeHtml(latest.reason)}` : ""}` : "—"}`,
+    `• last rejection: ${lastRejected?.reason ? `<code>${escapeHtml(lastRejected.reason)}</code>` : "—"}`,
+    "",
     "<b>OKX discovery</b>",
     ...okxDiscoveryStatusLines(okxStatus),
     "",
@@ -1516,7 +1506,24 @@ async function handlePing(chatId: number): Promise<void> {
     lines.push(`${checkNum}. OKX signal stream (discovery): ❌ ${escapeHtml(okxDiscovery.error ?? "unavailable")}`);
   }
 
-  // Check 3 — Telegram delivery. The reply itself is the proof.
+  // Check 3 — Private Feed poller health.
+  checkNum++;
+  const privateFeedHealth = getPollerHealth();
+  if (CONFIG.PRIVATE_SIGNAL_SOURCE === "off") {
+    lines.push(`${checkNum}. Private Feed: ⚪ skipped (disabled)`);
+  } else if (CONFIG.PRIVATE_SIGNAL_SOURCE === "postgres" && !CONFIG.DATABASE_URL) {
+    lines.push(`${checkNum}. Private Feed: ⚠️ DATABASE_URL not set for Postgres mode`);
+  } else if (CONFIG.PRIVATE_SIGNAL_SOURCE !== "postgres" && (!CONFIG.PRIVATE_SIGNAL_API_URL || !CONFIG.PRIVATE_SIGNAL_API_KEY)) {
+    lines.push(`${checkNum}. Private Feed: ⚠️ PRIVATE_SIGNAL_API_URL or PRIVATE_SIGNAL_API_KEY not set`);
+  } else if (privateFeedHealth.lastTickError) {
+    lines.push(`${checkNum}. Private Feed: ⚠️ ${escapeHtml(privateFeedHealth.lastTickError)} · HTTP ${privateFeedHealth.lastHttpStatus ?? "—"}`);
+  } else if (privateFeedHealth.lastTickOkAt) {
+    lines.push(`${checkNum}. Private Feed: ✅ HTTP ${privateFeedHealth.lastHttpStatus ?? "—"} · ${privateFeedHealth.lastAlertCount} alerts`);
+  } else {
+    lines.push(`${checkNum}. Private Feed: ⚠️ starting`);
+  }
+
+  // Check 4 — Telegram delivery. The reply itself is the proof.
   checkNum++;
   lines.push(`${checkNum}. Telegram delivery: ✅ (you're reading this message)`);
 
@@ -1530,6 +1537,7 @@ async function handlePing(chatId: number): Promise<void> {
   lines.push("");
   lines.push("<b>Signal sources</b>");
   lines.push(`• active mode: <b>${SOURCE_MODE_LABELS[sourceMode]}</b> <code>${sourceMode}</code>`);
+  lines.push(`• Private Feed status: ${privateFeedHealth.lastTickError ? "error" : privateFeedHealth.lastTickOkAt ? "polling" : "starting"} · last poll ${privateFeedHealth.lastTickOkAt ? formatAgo(Date.now() - privateFeedHealth.lastTickOkAt) : "never"} · seen ${privateFeedHealth.seenSize.toLocaleString("en-US")}`);
   lines.push(...okxDiscoveryStatusLines(okxDiscovery).map((line) => `• OKX discovery ${line.slice(2)}`));
   lines.push(...gmgnDiscoveryStatusLines(gmgnDiscovery).map((line) => `• GMGN scanner ${line.slice(2)}`));
   const wss = getOkxWsStatus();
@@ -2042,7 +2050,7 @@ async function handleSkip(chatId: number, argText: string): Promise<void> {
   logger.info({ mint }, "[telegram] added to blacklist");
   await tgPost("sendMessage", {
     chat_id: chatId,
-    text: `🚫 Added to blacklist: <code>${escapeHtml(mint)}</code>\nSCG/OKX/GMGN alerts for this token will be ignored.`,
+    text: `🚫 Added to blacklist: <code>${escapeHtml(mint)}</code>\nPrivate Feed/OKX/GMGN alerts for this token will be ignored.`,
     parse_mode: "HTML",
   });
 }
@@ -2200,11 +2208,9 @@ async function handleSetupStatus(chatId: number): Promise<void> {
 let backtestInFlight = false;
 
 async function handleBacktest(chatId: number, argText: string = ""): Promise<void> {
-  // `/backtest [source] [hybrid]` — source ∈ {scg, gmgn}, strategy ∈ {all, hybrid}
-  // [SCG-DISABLED 2026-04-22] Default source flipped from "scg" to "gmgn" now
-  // that live SCG polling is off. You can still pass `scg` explicitly to backtest
-  // against the SCG upstream (fetchScgTokens is still defined in _backtest.ts),
-  // but the default CLI path no longer hits SCG.
+  // `/backtest [source] [hybrid]` — source ∈ {private, gmgn}, strategy ∈ {all, hybrid}
+  // Default stays GMGN because it provides deeper historical samples; pass `private`
+  // explicitly to backtest the current Private Feed alert window.
   //   /backtest                  → interactive menu (buttons)
   //   /backtest hybrid           → gmgn + hybrid
   //   /backtest gmgn             → gmgn + all
@@ -2285,7 +2291,7 @@ async function handleBacktest(chatId: number, argText: string = ""): Promise<voi
   const fetchBlurb =
     source === "gmgn"
       ? "Fetching GMGN signals/trenches + OHLCV. Signal calls with timestamps use after-call candles; others use first-candle entry."
-      : "Fetching OKX signal-stream history via onchainos + OHLCV from each signal's timestamp with at least ~24h runway.";
+      : "Fetching OKX hot-tokens across all 4 time frames (5m/1h/4h/24h), deduped. Tokens need ≥24h of OHLCV runway — older tokens from the 24h frame supply the bulk of the sample.";
   const startMsg = await tgPost("sendMessage", {
     chat_id: chatId,
     text:
@@ -2383,9 +2389,9 @@ async function handleBacktest(chatId: number, argText: string = ""): Promise<voi
     const entryText = Object.entries(entrySourceCounts)
       .map(([k, v]) => `${v} ${k === "alert_mcap" ? "alert mcap" : "first candle"}`)
       .join(" · ") || "none";
-    lines.push(`<i>${samplesUsed}/${tokensFetched} SCG alerts · ${allResults.length} combos · ${Math.round(durationMs/1000)}s · OHLCV from signal time · ${resolutionText} · entries ${entryText}</i>`);
+    lines.push(`<i>${samplesUsed}/${tokensFetched} Private Feed alerts · ${allResults.length} combos · ${Math.round(durationMs/1000)}s · OHLCV from signal time · ${resolutionText} · entries ${entryText}</i>`);
     lines.push("");
-    lines.push("Source: SCG alert_time + alert_mcap entry when available, requiring usable post-signal OHLCV. 1m cannot cover 24h with the current 299-candle cap, so recommendations mostly use 5m/15m/1H.");
+    lines.push("Source: Private Feed alert_time + alert_mcap entry when available, requiring usable post-signal OHLCV. 1m cannot cover 24h with the current 299-candle cap, so recommendations mostly use 5m/15m/1H.");
     lines.push("");
     if (CONFIG.LLM_EXIT_ENABLED) {
       lines.push("⚠️ <b>LLM is ON</b> — LLM Managed is not modeled here. Adopting a deterministic result switches the exit strategy.");
@@ -3685,11 +3691,11 @@ export function startTelegramBot(): () => void {
       { command: "positions", description: "Open positions + force-sell buttons" },
       { command: "pnl",       description: "Today's PnL + all-time stats" },
       { command: "stats",     description: "Signal stats by mcap tier + adopt best range filter" },
-      { command: "mcapfilter", description: "Set MCap entry filter (e.g. /mcapfilter 50000 200000 or off)" },
+      { command: "mcapfilter", description: "MCap filter for OKX + GMGN (Private Feed bypasses filters)" },
       { command: "history",   description: "Last N closed trades (default 10)" },
       { command: "settings",  description: "Edit trading params live (no restart)" },
-      { command: "sources",   description: "Signal source mode + SCG/OKX/GMGN status" },
-      { command: "llm",       description: "LLM modes — toggle entry gate and/or exit advisor" },
+      { command: "sources",   description: "Signal source mode + Private Feed/OKX/GMGN status" },
+      { command: "llm",       description: "LLM modes — entry gate (OKX + GMGN) and/or exit advisor" },
       { command: "wss",       description: "OKX WSS status + open-position acceleration toggle" },
       { command: "pause",     description: "Stop taking new entry alerts" },
       { command: "resume",    description: "Resume taking new entry alerts" },

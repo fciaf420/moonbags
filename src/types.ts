@@ -1,7 +1,7 @@
-export interface ScgAlert {
+export interface SignalAlert {
   mint: string;
   name: string;
-  source?: "scg" | "okx" | string;
+  source?: "private" | "okx" | string;
   sourceMeta?: Record<string, unknown>;
   logo?: string;
   score: number;
@@ -45,8 +45,8 @@ export interface SignalMeta {
   source?: string;
 }
 
-export interface ScgAlertsResponse {
-  alerts: ScgAlert[];
+export interface SignalAlertsResponse {
+  alerts: SignalAlert[];
 }
 
 export type PositionStatus = "opening" | "open" | "closing" | "closed" | "failed";

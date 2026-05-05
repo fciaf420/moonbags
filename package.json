@@ -12,13 +12,16 @@
     "install:onchainos": "curl -sSL https://raw.githubusercontent.com/okx/onchainos-skills/main/install.sh | sh",
     "dev": "node --dns-result-order=ipv4first --import tsx --watch src/main.ts",
     "start": "node --dns-result-order=ipv4first --import tsx src/main.ts",
+    "private-feed:relay": "APP_ROLE=private-signal-relay node --dns-result-order=ipv4first --import tsx src/privateSignalRelay.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@solana/web3.js": "^1.95.0",
+    "@types/pg": "^8.20.0",
     "bs58": "^6.0.0",
     "dotenv": "^16.4.5",
-    "pino": "^9.5.0",
+    "pg": "^8.20.0",
+    "pino": "^10.3.1",
     "pino-pretty": "^11.3.0"
   },
   "devDependencies": {

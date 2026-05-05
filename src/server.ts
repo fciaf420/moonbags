@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { CONFIG } from "./config.js";
 import logger from "./logger.js";
 import { forceClosePosition, getPositions, getStats, getClosedTrades, getSignalStats, type SignalStats } from "./positionManager.js";
-import { getRecentAlertEvents } from "./scgPoller.js";
+import { getRecentAlertEvents } from "./privateSignalPoller.js";
 import { getTokenInfos } from "./jupTokensClient.js";
 import { getKline } from "./okxClient.js";
 import { getRuntimeSettings } from "./settingsStore.js";
@@ -100,7 +100,7 @@ async function buildState(): Promise<Record<string, unknown>> {
       MAX_HOLD_SECS: CONFIG.MAX_HOLD_SECS,
       MAX_CONCURRENT_POSITIONS: CONFIG.MAX_CONCURRENT_POSITIONS,
       SLIPPAGE_BPS: CONFIG.SLIPPAGE_BPS,
-      SCG_POLL_MS: CONFIG.SCG_POLL_MS,
+      PRIVATE_SIGNAL_POLL_MS: CONFIG.PRIVATE_SIGNAL_POLL_MS,
       PRICE_POLL_MS: CONFIG.PRICE_POLL_MS,
       DRY_RUN: CONFIG.DRY_RUN,
       LLM_EXIT_ENABLED: CONFIG.LLM_EXIT_ENABLED,
