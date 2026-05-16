@@ -122,7 +122,7 @@ export type State = {
     MAX_HOLD_SECS: number;
     MAX_CONCURRENT_POSITIONS: number;
     SLIPPAGE_BPS: number;
-    SCG_POLL_MS: number;
+    // SCG_POLL_MS: number; // [SCG Alpha temporarily disabled]
     PRICE_POLL_MS: number;
     DRY_RUN: boolean;
     LLM_EXIT_ENABLED?: boolean;

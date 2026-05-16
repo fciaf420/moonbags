@@ -2,6 +2,9 @@
 
 > Solana meme-token auto-trading bot with LLM-powered exit decisions.
 
+
+> **Note (May 2026):** SCG Alpha (Private Feed) is **temporarily disabled**. The upstream SCG Alpha hosting has been cancelled and the signal source is offline. All Private Feed / SCG Alpha references in the code have been commented out. OKX and GMGN signal sources remain fully operational. To re-enable, restore `PRIVATE_SIGNAL_SOURCE` in `src/config.ts` and configure the upstream endpoint.
+
 MoonBags is the **execution and management layer** for Solana meme-token signals. It consumes real-time discovery streams from **Private Feed calls**, **OKX smart-money signals**, and/or **GMGN's curated trenches + KOL call feeds**, buys via Jupiter Ultra, then manages exits with either a configurable trail/stop or — optionally — a MiniMax M2.7 LLM that reads live on-chain data (smart money flow, dev holdings, holder PnL, kline trends) every 30 seconds to decide when to sell.
 
 Telegram `/sources` lets you pick between `private_only`, `okx_watch`, `okx_only`, `gmgn_watch`, `gmgn_live`, `gmgn_only`, or `hybrid` at runtime, no restart. Whatever source creates the entry, MoonBags still sizes it, executes through Jupiter, watches it, and exits it with the same universal exit settings.

@@ -26,7 +26,7 @@ export function ConfigCard({ config }: Props) {
     ["STOP_PCT", `${(config.STOP_PCT * 100).toFixed(2)}%`],
     ["MAX_HOLD_SECS", fmtHold(config.MAX_HOLD_SECS)],
     ["SLIPPAGE_BPS", config.SLIPPAGE_BPS.toString()],
-    ["SCG_POLL_MS", config.SCG_POLL_MS.toString()],
+    // ["SCG_POLL_MS", config.SCG_POLL_MS.toString()], // [SCG Alpha temporarily disabled]
     ["PRICE_POLL_MS", config.PRICE_POLL_MS.toString()],
     ["DRY_RUN", String(config.DRY_RUN)],
   ];

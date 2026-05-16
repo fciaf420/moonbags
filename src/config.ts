@@ -92,11 +92,13 @@ export const CONFIG = ({
   PRIV_B58: PRIV_B58 ?? "",
   DATABASE_URL: DATABASE_URL ?? "",
   DATABASE_SSL: bool("DATABASE_SSL", true),
-  PRIVATE_SIGNAL_SOURCE: str("PRIVATE_SIGNAL_SOURCE") ?? (
-    DATABASE_URL
-      ? "postgres"
-      : (PRIVATE_SIGNAL_API_URL && PRIVATE_SIGNAL_API_KEY ? "direct" : "off")
-  ),
+  // [SCG Alpha temporarily disabled — upstream hosting cancelled]
+  // PRIVATE_SIGNAL_SOURCE: str("PRIVATE_SIGNAL_SOURCE") ?? (
+  //   DATABASE_URL
+  //     ? "postgres"
+  //     : (PRIVATE_SIGNAL_API_URL && PRIVATE_SIGNAL_API_KEY ? "direct" : "off")
+  // ),
+  PRIVATE_SIGNAL_SOURCE: "off",
   PRIVATE_SIGNAL_API_URL: PRIVATE_SIGNAL_API_URL ?? "",
   PRIVATE_SIGNAL_API_KEY: PRIVATE_SIGNAL_API_KEY ?? "",
   RPC_URL: resolveRpcUrl(),
