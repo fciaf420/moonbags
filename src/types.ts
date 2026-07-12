@@ -1,4 +1,5 @@
 export type SupportedChain = "solana" | "robinhood";
+export type QuoteSymbol = "SOL" | "ETH";
 
 const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 
@@ -11,11 +12,25 @@ export function canonicalPositionKey(chain: SupportedChain, tokenAddress: string
   return `${chain}:${tokenAddress}`;
 }
 
-export function migratePersistedPosition<T extends Record<string, unknown>>(raw: T): T & { chain: SupportedChain; tokenAddress: string; mint: string } {
+export function migratePersistedPosition<T extends Record<string, unknown>>(raw: T): T & { chain: SupportedChain; tokenAddress: string; mint: string; quoteSymbol: QuoteSymbol } {
   const chain: SupportedChain = raw.chain === "robinhood" ? "robinhood" : "solana";
   const tokenAddress = String(raw.tokenAddress ?? raw.mint ?? "");
   canonicalPositionKey(chain, tokenAddress);
-  return { ...raw, chain, tokenAddress: chain === "robinhood" ? tokenAddress.toLowerCase() : tokenAddress, mint: String(raw.mint ?? tokenAddress) };
+
+  // Derive quoteSymbol from chain or explicit field.
+  const explicitQuote = raw.quoteSymbol as string | undefined;
+  let quoteSymbol: QuoteSymbol;
+  if (explicitQuote === "ETH" || explicitQuote === "SOL") {
+    quoteSymbol = explicitQuote;
+  } else {
+    quoteSymbol = chain === "robinhood" ? "ETH" : "SOL";
+  }
+
+  return { ...raw, chain, tokenAddress: chain === "robinhood" ? tokenAddress.toLowerCase() : tokenAddress, mint: String(raw.mint ?? tokenAddress), quoteSymbol };
+}
+
+export function quoteSymbolForChain(chain: SupportedChain): QuoteSymbol {
+  return chain === "robinhood" ? "ETH" : "SOL";
 }
 
 export interface SignalAlert {
@@ -81,12 +96,45 @@ export interface Position {
   status: PositionStatus;
   entrySig?: string;
   exitSig?: string;
-  entrySolSpent: number;
+
+  // ---- Quote-neutral accounting (Task 10) ----
+  /** Quote asset symbol: "SOL" or "ETH". */
+  quoteSymbol: QuoteSymbol;
+
+  /** Amount of quote asset spent on entry (SOL or ETH). */
+  entryQuoteSpent: number;
+
+  /** Number of tokens held. */
   tokensHeld: bigint;
+
+  /** Token decimals. */
   tokenDecimals: number;
+
+  /** Token price in quote units at entry. */
+  entryQuotePrice: number;
+
+  /** Current token price in quote units. */
+  currentQuotePrice: number;
+
+  /** Peak token price in quote units. */
+  peakQuotePrice: number;
+
+  /** Buy transaction hash (or Solana signature). */
+  buyTxHash?: string;
+
+  /** Exit transaction hash (or Solana signature). */
+  exitTxHash?: string;
+
+  /** Cumulative realized PnL in quote units (for dashboard). */
+  realizedPnlQuote?: number;
+
+  // ---- Solana compatibility aliases (populated alongside neutral fields) ----
+  entrySolSpent: number;
   entryPricePerTokenSol: number;
   currentPricePerTokenSol: number;
   peakPricePerTokenSol: number;
+
+  // ---- Position lifecycle ----
   armed: boolean;
   openedAt: number;
   lastTickAt: number;
@@ -98,30 +146,29 @@ export interface Position {
   moonbagStartedAt?: number;
   originalTokensHeld?: bigint;
   // LLM exit advisor state
-  dynamicTrailPct?: number;       // when set, overrides CONFIG.TRAIL_PCT for this position
-  lastLlmCheckAt?: number;        // throttle: don't ask LLM more than once per LLM_POLL_MS
-  llmActiveNotified?: boolean;    // dedupe: only send "LLM watching" once per position
-  lastLlmAction?: string;         // last LLM action: "hold" | "set_trail" | "exit_now" | "partial_exit"
-  lastLlmReason?: string;         // surfaced in the SELL Telegram message when LLM triggers exit
-  llmWatchStartedAt?: number;     // timestamp when LLM first picked up this position
-  lastLlmHeartbeatAt?: number;    // timestamp of most recent heartbeat notification
-  llmDecisionCount?: number;      // total number of LLM decisions made for this position
-  lastLlmDecisionAt?: number;     // timestamp of most recent LLM decision
-  // Milestone notifications: which PnL-% thresholds have already fired (fire-once dedupe)
+  dynamicTrailPct?: number;
+  lastLlmCheckAt?: number;
+  llmActiveNotified?: boolean;
+  lastLlmAction?: string;
+  lastLlmReason?: string;
+  llmWatchStartedAt?: number;
+  lastLlmHeartbeatAt?: number;
+  llmDecisionCount?: number;
+  lastLlmDecisionAt?: number;
+  // Milestone notifications
   milestonesHit?: number[];
-  // TP ladder targets already executed for this position (stores target indexes).
+  // TP ladder targets already executed
   tpTargetsHit?: number[];
-  // LLM-managed partial exits — log each time the LLM decides to sell a fraction
-  // of the position to lock profit while keeping the rest running.
+  // LLM-managed partial exits
   partialExits?: Array<{
-    at: number;           // timestamp ms
-    sellPct: number;      // fraction of then-current tokensHeld that was sold
-    entrySol?: number;    // proportional entry basis assigned to the sold piece
-    exitSol: number;      // SOL received from this partial sell
-    pnlSol?: number;      // net SOL profit/loss from the sold piece
-    priceSol: number;     // token price in SOL at time of sell
-    reason: string;       // LLM's reason
-    sig?: string;         // tx signature
+    at: number;
+    sellPct: number;
+    entrySol?: number;
+    exitSol: number;
+    pnlSol?: number;
+    priceSol: number;
+    reason: string;
+    sig?: string;
   }>;
   signalMeta?: SignalMeta;
 }
