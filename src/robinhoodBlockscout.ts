@@ -17,7 +17,7 @@ export function calculateHolderConcentration(holders:BlockscoutHolder[],totalSup
  return {rawTop10Pct:pct(sorted),adjustedTop10Pct:pct(sorted.filter(h=>!excluded(h))),holderCount:holders.length,excludedAddresses};
 }
 export async function fetchHolderConcentration(tokenAddress:string,opts:{fetcher?:typeof fetch;baseUrl?:string;maxPages?:number;timeoutMs?:number;totalSupply?:number}):Promise<HolderConcentration>{
- const fetcher=opts.fetcher??fetch, base=(opts.baseUrl??"https://explorer.robinhoodchain.com").replace(/\/$/,""); const max=opts.maxPages??5; const rows:BlockscoutHolder[]=[]; let params="";
+ const fetcher=opts.fetcher??fetch, base=(opts.baseUrl??"https://robinhoodchain.blockscout.com").replace(/\/$/,""); const max=opts.maxPages??5; const rows:BlockscoutHolder[]=[]; let params="";
  let totalSupply=opts.totalSupply;
  if(totalSupply===undefined){
   const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),opts.timeoutMs??10000);

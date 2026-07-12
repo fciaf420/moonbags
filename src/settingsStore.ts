@@ -360,7 +360,7 @@ function normalizeNumberList(value: unknown, fallback: number[], min = -Infinity
   return items.length > 0 ? Array.from(new Set(items)) : fallback;
 }
 
-function normalizeSettings(raw: unknown): RuntimeSettings {
+export function normalizeSettings(raw: unknown): RuntimeSettings {
   const defaults = defaultSettings();
   const root = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const buy = (root.buy && typeof root.buy === "object" ? root.buy : {}) as Record<string, unknown>;
@@ -393,6 +393,9 @@ function normalizeSettings(raw: unknown): RuntimeSettings {
   ) as Record<string, unknown>;
   const gmgnTrigger = (
     gmgnSignals.trigger && typeof gmgnSignals.trigger === "object" ? gmgnSignals.trigger : {}
+  ) as Record<string, unknown>;
+  const dexscreenerSignals = (
+    signals.dexscreener && typeof signals.dexscreener === "object" ? signals.dexscreener : {}
   ) as Record<string, unknown>;
   const marketData = (root.marketData && typeof root.marketData === "object" ? root.marketData : {}) as Record<string, unknown>;
   const wss = (marketData.wss && typeof marketData.wss === "object" ? marketData.wss : {}) as Record<string, unknown>;
@@ -532,7 +535,24 @@ function normalizeSettings(raw: unknown): RuntimeSettings {
           minSmartOrKolCount: Math.round(num(gmgnTrigger.minSmartOrKolCount, defaults.signals.gmgn.trigger.minSmartOrKolCount, 0, 1000)),
         },
       },
-      dexscreener: defaults.signals.dexscreener,
+      dexscreener: {
+        enabled: bool(dexscreenerSignals.enabled, defaults.signals.dexscreener.enabled),
+        executablePath: typeof dexscreenerSignals.executablePath === "string" && dexscreenerSignals.executablePath.trim() ? dexscreenerSignals.executablePath.trim() : defaults.signals.dexscreener.executablePath,
+        pollMs: Math.round(num(dexscreenerSignals.pollMs, defaults.signals.dexscreener.pollMs, 1_000, 600_000)),
+        seedLimit: Math.round(num(dexscreenerSignals.seedLimit, defaults.signals.dexscreener.seedLimit, 1, 100)),
+        mintCooldownMins: num(dexscreenerSignals.mintCooldownMins, defaults.signals.dexscreener.mintCooldownMins, 0, 1440),
+        watchlistTtlMins: num(dexscreenerSignals.watchlistTtlMins, defaults.signals.dexscreener.watchlistTtlMins, 1, 1440 * 7),
+        maxWatchTokens: Math.round(num(dexscreenerSignals.maxWatchTokens, defaults.signals.dexscreener.maxWatchTokens, 1, 1000)),
+        minScans: Math.round(num(dexscreenerSignals.minScans, defaults.signals.dexscreener.minScans, 1, 20)),
+        minLiquidityUsd: num(dexscreenerSignals.minLiquidityUsd, defaults.signals.dexscreener.minLiquidityUsd, 0),
+        minHolders: Math.round(num(dexscreenerSignals.minHolders, defaults.signals.dexscreener.minHolders, 0, 1_000_000_000)),
+        maxMarketCapUsd: num(dexscreenerSignals.maxMarketCapUsd, defaults.signals.dexscreener.maxMarketCapUsd, 0),
+        minBuySellRatio: num(dexscreenerSignals.minBuySellRatio, defaults.signals.dexscreener.minBuySellRatio, 0),
+        minH1Transactions: Math.round(num(dexscreenerSignals.minH1Transactions, defaults.signals.dexscreener.minH1Transactions, 0)),
+        minH1PriceAcceleration: num(dexscreenerSignals.minH1PriceAcceleration, defaults.signals.dexscreener.minH1PriceAcceleration),
+        minH1VolumeAcceleration: num(dexscreenerSignals.minH1VolumeAcceleration, defaults.signals.dexscreener.minH1VolumeAcceleration, 0),
+        maxAdjustedTop10Pct: num(dexscreenerSignals.maxAdjustedTop10Pct, defaults.signals.dexscreener.maxAdjustedTop10Pct, 0, 100),
+      },
     },
     marketData: {
       wss: {

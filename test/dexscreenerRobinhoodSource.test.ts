@@ -77,3 +77,23 @@ test("uses verified Blockscout holders instead of stale CLI holder count", async
   now+=1000; await source.refresh();
   assert.deepEqual(accepted,[address]);
 });
+
+test("holder verification failure rejects one candidate without aborting the scan", async () => {
+  let now=1000;
+  const second="0x00000000000000000000000000000000000000bb";
+  const events:RobinhoodPaperSourceEvent[]=[];
+  const accepted:string[]=[];
+  const source=createRobinhoodWatchSource({
+    runner:async()=>JSON.stringify([base,{...base,tokenAddress:second}]), clock:()=>now,
+    settings:{...settings,minH1VolumeAcceleration:0},
+    concentration:async token=>{
+      if(token===address) throw new Error("Blockscout unavailable");
+      return {rawTop10Pct:10,adjustedTop10Pct:10,holderCount:200,excludedAddresses:[]};
+    },
+    onPaperEvent:event=>events.push(event), onAcceptedCandidate:alert=>accepted.push(alert.mint),
+  });
+  await source.refresh();
+  now+=1000; await source.refresh();
+  assert.ok(events.some(event=>event.type==="rejected"&&event.tokenAddress===address&&event.reason==="holder verification unavailable"));
+  assert.deepEqual(accepted,[second]);
+});
