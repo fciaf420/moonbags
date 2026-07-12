@@ -1,5 +1,6 @@
 import { CONFIG } from "./config.js";
 import logger from "./logger.js";
+import type { SignalAlert } from "./types.js";
 
 /**
  * Escape HTML special chars so Telegram's parse_mode="HTML" doesn't reject

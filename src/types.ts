@@ -1,4 +1,26 @@
+export type SupportedChain = "solana" | "robinhood";
+
+const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+
+export function canonicalPositionKey(chain: SupportedChain, tokenAddress: string): string {
+  if (!tokenAddress) throw new Error("token address is required");
+  if (chain === "robinhood") {
+    if (!EVM_ADDRESS.test(tokenAddress)) throw new Error("invalid Robinhood EVM address");
+    return `${chain}:${tokenAddress.toLowerCase()}`;
+  }
+  return `${chain}:${tokenAddress}`;
+}
+
+export function migratePersistedPosition<T extends Record<string, unknown>>(raw: T): T & { chain: SupportedChain; tokenAddress: string; mint: string } {
+  const chain: SupportedChain = raw.chain === "robinhood" ? "robinhood" : "solana";
+  const tokenAddress = String(raw.tokenAddress ?? raw.mint ?? "");
+  canonicalPositionKey(chain, tokenAddress);
+  return { ...raw, chain, tokenAddress: chain === "robinhood" ? tokenAddress.toLowerCase() : tokenAddress, mint: String(raw.mint ?? tokenAddress) };
+}
+
 export interface SignalAlert {
+  chain?: SupportedChain;
+  tokenAddress?: string;
   mint: string;
   name: string;
   source?: "private" | "okx" | string;
@@ -52,6 +74,8 @@ export interface SignalAlertsResponse {
 export type PositionStatus = "opening" | "open" | "closing" | "closed" | "failed";
 
 export interface Position {
+  chain?: SupportedChain;
+  tokenAddress?: string;
   mint: string;
   name: string;
   status: PositionStatus;

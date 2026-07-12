@@ -1,6 +1,6 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
-import type { Position, SignalAlert, SignalMeta } from "./types.js";
+import { migratePersistedPosition, type Position, type SignalAlert, type SignalMeta } from "./types.js";
 import { CONFIG, SOL_MINT } from "./config.js";
 import logger from "./logger.js";
 import { buyTokenWithSol, sellTokenForSol, getWalletTokenBalance, unwrapResidualWsol } from "./jupClient.js";
@@ -273,8 +273,9 @@ function serializePos(p: Position): Record<string, unknown> {
 }
 
 function deserializePos(raw: Record<string, unknown>): Position {
+  const migrated = migratePersistedPosition(raw);
   return {
-    ...raw,
+    ...migrated,
     tokensHeld: BigInt(String(raw.tokensHeld ?? "0")),
     originalTokensHeld: raw.originalTokensHeld ? BigInt(String(raw.originalTokensHeld)) : undefined,
   } as Position;

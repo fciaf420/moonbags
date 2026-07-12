@@ -1,0 +1,40 @@
+[
+  {
+    "chainId": "robinhood",
+    "tokenAddress": "0xDD5690e04BcAC0f06e405362e0B3BadB92DAe711",
+    "tokenSymbol": "memecoin",
+    "tokenName": "a memecoin that could 100x",
+    "dexId": "uniswap",
+    "pairAddress": "0x0B94EF4674E218181d306554431127466bAD887a",
+    "pairUrl": "https://dexscreener.com/robinhood/0x0b94ef4674e218181d306554431127466bad887a",
+    "priceUsd": 0.000169,
+    "priceChangeH1": 779,
+    "priceChangeH24": 779,
+    "volumeH24": 144324,
+    "txnsH1": 417,
+    "liquidityUsd": 93065.64,
+    "marketCap": 169023,
+    "fdv": 169023,
+    "holdersCount": 239,
+    "holdersSource": "blockscout",
+    "boostTotal": 79.36595208015873,
+    "boostCount": 1,
+    "hasProfile": false,
+    "score": 81.94,
+    "tags": ["momentum", "buy-pressure", "fresh-pair", "breakout-ready", "rs-leader"],
+    "analytics": {
+      "compressionScore": 40.9,
+      "breakoutReadiness": 70.67,
+      "volumeVelocity": 24,
+      "txnVelocity": 24,
+      "relativeStrength": 863.62,
+      "chainBaselineH1": 29.8,
+      "boostVelocityPerMin": 0,
+      "momentumHalfLifeMin": null,
+      "momentumDecayRatio": null,
+      "fastDecay": false,
+      "baseScore": 76.54,
+      "scoreComponents": {"volume":22.513,"transactions":14.553,"liquidity":13.808,"momentum":12,"flow":5.871,"boost":4.799,"recency":3,"profile":0}
+    }
+  }
+]

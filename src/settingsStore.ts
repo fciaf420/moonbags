@@ -7,7 +7,7 @@ const STATE_DIR = path.resolve("state");
 const SETTINGS_FILE = path.join(STATE_DIR, "settings.json");
 
 export type ExitStrategyMode = "trail" | "fixed_tp" | "tp_ladder" | "llm_managed";
-export type SourceMode = "private_only" | "okx_watch" | "hybrid" | "okx_only" | "gmgn_watch" | "gmgn_live" | "gmgn_only";
+export type SourceMode = "private_only" | "okx_watch" | "hybrid" | "okx_only" | "gmgn_watch" | "gmgn_live" | "gmgn_only" | "dexscreener_watch" | "dexscreener_live" | "dexscreener_only";
 
 export type TpTarget = {
   pnlPct: number;  // decimal, e.g. 0.5 = +50%
@@ -123,6 +123,13 @@ export type RuntimeSettings = {
         minSmartOrKolCount: number;
       };
     };
+    dexscreener: {
+      enabled: boolean; executablePath: string; pollMs: number; seedLimit: number;
+      mintCooldownMins: number; watchlistTtlMins: number; maxWatchTokens: number;
+      minScans: number; minLiquidityUsd: number; minHolders: number; maxMarketCapUsd: number;
+      minBuySellRatio: number; minH1Transactions: number; minH1PriceAcceleration: number;
+      minH1VolumeAcceleration: number; maxAdjustedTop10Pct: number;
+    };
   };
   marketData: {
     wss: {
@@ -158,6 +165,9 @@ export const SOURCE_MODE_LABELS: Record<SourceMode, string> = {
   gmgn_watch: "GMGN Watch",
   gmgn_live: "GMGN Live",
   gmgn_only: "GMGN only",
+  dexscreener_watch: "Dexscreener Robinhood Watch",
+  dexscreener_live: "Dexscreener Robinhood Live (watch-only)",
+  dexscreener_only: "Dexscreener Robinhood only (watch-only)",
 };
 
 const DEFAULT_TP_TARGETS: TpTarget[] = [
@@ -281,6 +291,12 @@ function defaultSettings(): RuntimeSettings {
           minSmartOrKolCount: 0,
         },
       },
+      dexscreener: {
+        enabled: false, executablePath: "/data/repos/dexscreener-cli-mcp-tool/ds", pollMs: 30_000, seedLimit: 10,
+        mintCooldownMins: 60, watchlistTtlMins: 180, maxWatchTokens: 120, minScans: 2,
+        minLiquidityUsd: 10_000, minHolders: 100, maxMarketCapUsd: 2_000_000, minBuySellRatio: 1.15,
+        minH1Transactions: 50, minH1PriceAcceleration: 0, minH1VolumeAcceleration: 1, maxAdjustedTop10Pct: 50,
+      },
     },
     marketData: {
       wss: {
@@ -399,6 +415,9 @@ function normalizeSettings(raw: unknown): RuntimeSettings {
     rawSourceMode === "gmgn_watch" ||
     rawSourceMode === "gmgn_live" ||
     rawSourceMode === "gmgn_only" ||
+    rawSourceMode === "dexscreener_watch" ||
+    rawSourceMode === "dexscreener_live" ||
+    rawSourceMode === "dexscreener_only" ||
     rawSourceMode === "private_only"
       ? rawSourceMode
       : defaults.signals.sourceMode;
@@ -513,6 +532,7 @@ function normalizeSettings(raw: unknown): RuntimeSettings {
           minSmartOrKolCount: Math.round(num(gmgnTrigger.minSmartOrKolCount, defaults.signals.gmgn.trigger.minSmartOrKolCount, 0, 1000)),
         },
       },
+      dexscreener: defaults.signals.dexscreener,
     },
     marketData: {
       wss: {
