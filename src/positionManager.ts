@@ -1,9 +1,11 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
-import { migratePersistedPosition, type Position, type SignalAlert, type SignalMeta } from "./types.js";
+import { migratePersistedPosition, quoteSymbolForChain, type Position, type SignalAlert, type SignalMeta, type SupportedChain } from "./types.js";
+import type { TradingAdapter } from "./tradingAdapter.js";
 import { CONFIG, SOL_MINT } from "./config.js";
 import logger from "./logger.js";
 import { buyTokenWithSol, sellTokenForSol, getWalletTokenBalance, unwrapResidualWsol } from "./jupClient.js";
+import { getSolanaAdapter } from "./solanaJupiterAdapter.js";
 import { getBatchPricesParallel, getPriceViaSellQuote } from "./priceFeed.js";
 import { notifyBuy, notifyBuyFail, notifySell, notifySellFail, notifyArmed, notifyMoonbagStart, notifyLlmActive, notifyLlmTighten, notifyLlmPartial, notifyTakeProfitPartial, notifyMilestone, notifyLlmHeartbeat } from "./notifier.js";
 import { consultLlm, type LlmContext } from "./llmExitAdvisor.js";
@@ -22,6 +24,17 @@ const positions = new Map<string, Position>();
 const everBoughtMints = new Set<string>(); // permanent dedupe — never buy the same mint twice
 const BOOT_AT = Date.now();
 let realizedPnlSol = 0;
+
+// ---------------------------------------------------------------------------
+// Adapter resolution — returns the right TradingAdapter for a chain.
+// Solana → Jupiter; Robinhood → Uniswap (when available).
+// ---------------------------------------------------------------------------
+function getAdapter(chain?: SupportedChain): TradingAdapter {
+  if (chain === "robinhood") {
+    throw new Error("Robinhood adapter not yet wired — use Solana for now");
+  }
+  return getSolanaAdapter();
+}
 
 type CloseReason = "trail" | "stop" | "timeout" | "take_profit" | "manual" | "moonbag_trail" | "moonbag_timeout" | "llm";
 
@@ -499,13 +512,22 @@ export async function openPosition(alert: SignalAlert): Promise<Position | null>
     return null;
   }
 
+  const chain = alert.chain ?? "solana";
+  const quoteSym = quoteSymbolForChain(chain);
   const placeholder: Position = {
+    chain,
+    tokenAddress: alert.tokenAddress ?? alert.mint,
     mint: alert.mint,
     name: alert.name,
     status: "opening",
-    entrySolSpent: 0,
+    quoteSymbol: quoteSym,
+    entryQuoteSpent: 0,
     tokensHeld: 0n,
     tokenDecimals: 0,
+    entryQuotePrice: 0,
+    currentQuotePrice: 0,
+    peakQuotePrice: 0,
+    entrySolSpent: 0,
     entryPricePerTokenSol: 0,
     currentPricePerTokenSol: 0,
     peakPricePerTokenSol: 0,
@@ -541,14 +563,23 @@ export async function openPosition(alert: SignalAlert): Promise<Position | null>
     entryPricePerTokenSol = 0;
   }
 
+  const entrySolSpent = Number(solLamports) / 1e9;
   const position: Position = {
+    chain,
+    tokenAddress: alert.tokenAddress ?? alert.mint,
     mint: alert.mint,
     name: alert.name,
     status: "open",
     entrySig: signature,
-    entrySolSpent: Number(solLamports) / 1e9,
+    quoteSymbol: quoteSym,
+    entryQuoteSpent: entrySolSpent,
     tokensHeld: tokensReceivedRaw,
     tokenDecimals,
+    entryQuotePrice: entryPricePerTokenSol,
+    currentQuotePrice: entryPricePerTokenSol,
+    peakQuotePrice: entryPricePerTokenSol,
+    buyTxHash: signature,
+    entrySolSpent,
     entryPricePerTokenSol,
     currentPricePerTokenSol: entryPricePerTokenSol,
     peakPricePerTokenSol: entryPricePerTokenSol,
