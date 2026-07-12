@@ -29,12 +29,14 @@ export interface DexscreenerPriceFeedConfig {
 
 interface DexscreenerPair {
   chainId?: string;
+  tokenAddress?: string;
   baseToken?: { address?: string };
   priceUsd?: string;
 }
 
 interface DexscreenerInspectOutput {
   pairs?: DexscreenerPair[];
+  primaryPair?: DexscreenerPair;
 }
 
 function defaultRunCli(executablePath: string): RunCliFn {
@@ -59,12 +61,14 @@ async function fetchSingle(
       "robinhood",
       "--json",
     ]);
-    const parsed = JSON.parse(stdout) as DexscreenerInspectOutput;
-    const pairs = parsed.pairs ?? [];
+    const jsonStart = stdout.indexOf("{");
+    if (jsonStart < 0) throw new Error("Dexscreener inspect output did not contain JSON");
+    const parsed = JSON.parse(stdout.slice(jsonStart)) as DexscreenerInspectOutput;
+    const pairs = parsed.pairs ?? (parsed.primaryPair ? [parsed.primaryPair] : []);
 
     for (const pair of pairs) {
       if (
-        pair.baseToken?.address?.toLowerCase() === addr &&
+        (pair.tokenAddress?.toLowerCase() === addr || pair.baseToken?.address?.toLowerCase() === addr) &&
         pair.priceUsd
       ) {
         const price = parseFloat(pair.priceUsd);

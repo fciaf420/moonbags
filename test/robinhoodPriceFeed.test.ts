@@ -73,6 +73,13 @@ test("fetchUsdPrice returns USD price from Dexscreener result", async () => {
   assert.equal(price, 0.00042);
 });
 
+test("fetchUsdPrice parses setup-tip-prefixed primaryPair output from the real CLI", async () => {
+  const address="0x1234567890abcdef1234567890abcdef12345678";
+  const mockRun=async ():Promise<string>=>`Tip: Run ds setup to pick your chains and preferences (takes 30 seconds).\n\n${JSON.stringify({primaryPair:{chainId:"robinhood",tokenAddress:address,priceUsd:"0.00077"}})}`;
+  const fetcher=createDexscreenerPriceFetcher({executablePath:"/bin/true"},mockRun);
+  assert.equal(await fetcher.fetchUsdPrice(address),0.00077);
+});
+
 test("fetchUsdPrice lowercases the address for lookup", async () => {
   const calledWith: string[] = [];
   const mockRun = async (_cmd: string, args: string[]): Promise<string> => {
