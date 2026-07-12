@@ -109,6 +109,48 @@ async function fetchOk(url: string, init?: RequestInit): Promise<{ ok: boolean; 
   }
 }
 
+function readRuntimeSourceMode(): string {
+  if (!existsSync("state/settings.json")) return "private_only";
+  try {
+    const raw = JSON.parse(readFileSync("state/settings.json", "utf8")) as { signals?: { sourceMode?: string } };
+    return raw.signals?.sourceMode ?? "private_only";
+  } catch {
+    return "private_only";
+  }
+}
+
+function readDexscreenerExecutablePath(): string {
+  if (!existsSync("state/settings.json")) return "/data/repos/dexscreener-cli-mcp-tool/ds";
+  try {
+    const raw = JSON.parse(readFileSync("state/settings.json", "utf8")) as { signals?: { dexscreener?: { executablePath?: string } } };
+    return raw.signals?.dexscreener?.executablePath ?? "/data/repos/dexscreener-cli-mcp-tool/ds";
+  } catch {
+    return "/data/repos/dexscreener-cli-mcp-tool/ds";
+  }
+}
+
+async function probeEvmChainId(url: string): Promise<{ ok: boolean; detail: string }> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: "doctor", method: "eth_chainId", params: [] }),
+      signal: ac.signal,
+    });
+    const body = await res.json() as { result?: string };
+    const chainId = body.result ? Number.parseInt(body.result, 16) : NaN;
+    return chainId === 4663
+      ? { ok: true, detail: "chain ID 4663 (0x1237)" }
+      : { ok: false, detail: `expected chain ID 4663, received ${body.result ?? "no result"}` };
+  } catch (err) {
+    return { ok: false, detail: (err as Error).message };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function checkSourceMode(env: EnvMap): DoctorCheck | null {
   if (!existsSync("state/settings.json")) return null;
   let sourceMode = "";
@@ -213,84 +255,74 @@ async function probeGmgn(apiKey: string, host?: string): Promise<{ ok: boolean; 
   }
 }
 
-function checkEnvVars(env: EnvMap): DoctorCheck[] {
+export function checkEnvVarsForMode(env: EnvMap, sourceMode = "private_only"): DoctorCheck[] {
   const dryRun = (env.DRY_RUN ?? "true").trim().toLowerCase();
   const isDryRun = ["", "1", "true", "yes", "y", "on"].includes(dryRun);
+  const robinhoodMode = sourceMode.startsWith("dexscreener_");
   const checks: DoctorCheck[] = [];
 
-  const required = [
-    ["JUP_API_KEY", "Jupiter API key"],
-    ["HELIUS_API_KEY", "Helius API key"],
-  ] as const;
-
-  for (const [key, label] of required) {
+  if (robinhoodMode) {
+    const rpcSet = hasValue(env, "EVM_RPC_URL");
     checks.push({
-      id: `env:${key}`,
-      label,
-      status: hasValue(env, key) ? "ok" : "fail",
-      detail: hasValue(env, key) ? "set" : `${key} is missing from .env`,
-      fix: hasValue(env, key) ? undefined : "Run npm run setup and paste the missing key.",
+      id: "env:EVM_RPC_URL",
+      label: "Robinhood EVM RPC",
+      status: rpcSet ? "ok" : "fail",
+      detail: rpcSet ? "set" : "EVM_RPC_URL is missing from .env",
+      fix: rpcSet ? undefined : "Set EVM_RPC_URL to a Robinhood Chain RPC endpoint.",
     });
+    const liveRequested = sourceMode !== "dexscreener_watch" && !isDryRun && envBool(env, "ROBINHOOD_LIVE_ENABLED") === true;
+    if (liveRequested) {
+      const keySet = hasValue(env, "EVM_PRIV_KEY");
+      checks.push({
+        id: "env:EVM_PRIV_KEY",
+        label: "Robinhood EVM wallet key",
+        status: keySet ? "ok" : "fail",
+        detail: keySet ? "set" : "EVM_PRIV_KEY is missing while Robinhood live mode is enabled",
+        fix: keySet ? undefined : "Set a dedicated EVM_PRIV_KEY in .env; never set it through Telegram.",
+      });
+    }
+  } else {
+    for (const [key, label] of [["JUP_API_KEY", "Jupiter API key"], ["HELIUS_API_KEY", "Helius API key"]] as const) {
+      checks.push({
+        id: `env:${key}`,
+        label,
+        status: hasValue(env, key) ? "ok" : "fail",
+        detail: hasValue(env, key) ? "set" : `${key} is missing from .env`,
+        fix: hasValue(env, key) ? undefined : "Run npm run setup and paste the missing key.",
+      });
+    }
+    checks.push({
+      id: "env:PRIV_B58",
+      label: "Wallet private key",
+      status: hasValue(env, "PRIV_B58") ? "ok" : isDryRun ? "warn" : "fail",
+      detail: hasValue(env, "PRIV_B58") ? "set" : isDryRun ? "missing, but DRY_RUN=true" : "PRIV_B58 is missing while DRY_RUN=false",
+      fix: hasValue(env, "PRIV_B58") ? undefined : "Run npm run setup to generate/import a wallet.",
+    });
+
+    const okxSet = hasValue(env, "OKX_API_KEY") && hasValue(env, "OKX_SECRET_KEY") &&
+      (hasValue(env, "OKX_PASSPHRASE") || hasValue(env, "OKX_API_PASSPHRASE"));
+    checks.push({ id: "env:okx", label: "OKX OnchainOS keys", status: okxSet ? "ok" : "warn", detail: okxSet ? "set" : "missing one or more OKX_API_KEY / OKX_SECRET_KEY / OKX_PASSPHRASE", fix: okxSet ? undefined : "Create keys at https://web3.okx.com/onchain-os/dev-portal, then run npm run setup." });
+
+    const gmgnSet = hasValue(env, "GMGN_API_KEY");
+    checks.push({ id: "env:gmgn", label: "GMGN OpenAPI key", status: gmgnSet ? "ok" : "warn", detail: gmgnSet ? "set" : "missing GMGN_API_KEY (GMGN source modes disabled)", fix: gmgnSet ? undefined : "Create a GMGN API key at https://gmgn.ai/ai?chain=sol and add GMGN_API_KEY to .env." });
+
+    const privateSource = env.PRIVATE_SIGNAL_SOURCE?.trim() || (hasValue(env, "DATABASE_URL") ? "postgres" : "direct");
+    const privateSet = privateSource === "postgres"
+      ? hasValue(env, "DATABASE_URL")
+      : hasValue(env, "PRIVATE_SIGNAL_API_URL") && hasValue(env, "PRIVATE_SIGNAL_API_KEY");
+    checks.push({ id: "env:private", label: "Private Feed", status: privateSet ? "ok" : "warn", detail: privateSet ? `${privateSource} configured` : "not configured (Private Feed source disabled)", fix: privateSet ? undefined : "Set PRIVATE_SIGNAL_SOURCE=postgres with DATABASE_URL, or set PRIVATE_SIGNAL_API_URL + PRIVATE_SIGNAL_API_KEY." });
   }
 
-  checks.push({
-    id: "env:PRIV_B58",
-    label: "Wallet private key",
-    status: hasValue(env, "PRIV_B58") ? "ok" : isDryRun ? "warn" : "fail",
-    detail: hasValue(env, "PRIV_B58")
-      ? "set"
-      : isDryRun
-        ? "missing, but DRY_RUN=true"
-        : "PRIV_B58 is missing while DRY_RUN=false",
-    fix: hasValue(env, "PRIV_B58") ? undefined : "Run npm run setup to generate/import a wallet.",
-  });
-
-  const okxSet = hasValue(env, "OKX_API_KEY") && hasValue(env, "OKX_SECRET_KEY") &&
-    (hasValue(env, "OKX_PASSPHRASE") || hasValue(env, "OKX_API_PASSPHRASE"));
-  checks.push({
-    id: "env:okx",
-    label: "OKX OnchainOS keys",
-    status: okxSet ? "ok" : "warn",
-    detail: okxSet ? "set" : "missing one or more OKX_API_KEY / OKX_SECRET_KEY / OKX_PASSPHRASE",
-    fix: okxSet ? undefined : "Create keys at https://web3.okx.com/onchain-os/dev-portal, then run npm run setup.",
-  });
-
-  const gmgnSet = hasValue(env, "GMGN_API_KEY");
-  checks.push({
-    id: "env:gmgn",
-    label: "GMGN OpenAPI key",
-    status: gmgnSet ? "ok" : "warn",
-    detail: gmgnSet ? "set" : "missing GMGN_API_KEY (GMGN source modes disabled)",
-    fix: gmgnSet ? undefined : "Create a GMGN API key at https://gmgn.ai/ai?chain=sol and add GMGN_API_KEY to .env.",
-  });
-
-  const privateSource = env.PRIVATE_SIGNAL_SOURCE?.trim() || (hasValue(env, "DATABASE_URL") ? "postgres" : "direct");
-  const privateDirectSet = hasValue(env, "PRIVATE_SIGNAL_API_URL") && hasValue(env, "PRIVATE_SIGNAL_API_KEY");
-  const privatePostgresSet = hasValue(env, "DATABASE_URL");
-  const privateSet = privateSource === "postgres" ? privatePostgresSet : privateDirectSet;
-  checks.push({
-    id: "env:private",
-    label: "Private Feed",
-    status: privateSet ? "ok" : "warn",
-    detail: privateSet ? `${privateSource} configured` : "not configured (Private Feed source disabled)",
-    fix: privateSet ? undefined : "Set PRIVATE_SIGNAL_SOURCE=postgres with DATABASE_URL, or set PRIVATE_SIGNAL_API_URL + PRIVATE_SIGNAL_API_KEY.",
-  });
-
   const telegramSet = hasValue(env, "TELEGRAM_BOT_TOKEN") && hasValue(env, "TELEGRAM_CHAT_ID");
-  checks.push({
-    id: "env:telegram",
-    label: "Telegram bot settings",
-    status: telegramSet ? "ok" : "warn",
-    detail: telegramSet ? "set" : "missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID",
-    fix: telegramSet ? undefined : "Run npm run setup after creating a bot with @BotFather.",
-  });
-
+  checks.push({ id: "env:telegram", label: "Telegram bot settings", status: telegramSet ? "ok" : "warn", detail: telegramSet ? "set" : "missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID", fix: telegramSet ? undefined : "Run npm run setup after creating a bot with @BotFather." });
   return checks;
 }
 
 export async function runDoctor(options: { network?: boolean } = {}): Promise<DoctorReport> {
   const network = options.network ?? true;
   const env = loadEnv();
+  const sourceMode = readRuntimeSourceMode();
+  const robinhoodMode = sourceMode.startsWith("dexscreener_");
   const checks: DoctorCheck[] = [];
 
   const platform = os.platform();
@@ -347,44 +379,42 @@ export async function runDoctor(options: { network?: boolean } = {}): Promise<Do
     fix: npm.ok ? undefined : "Install Node.js 20+, which includes npm.",
   });
 
-  const onchainos = await run("onchainos", ["--version"]);
-  checks.push({
-    id: "onchainos:version",
-    label: "OnchainOS CLI",
-    status: onchainos.ok ? "ok" : "fail",
-    detail: onchainos.ok ? firstLine(onchainos.stdout || onchainos.stderr) : onchainos.error ?? "not found",
-    fix: onchainos.ok ? undefined : "Run npm run install:onchainos, then export PATH=\"$HOME/.local/bin:$PATH\".",
-  });
-
-  // Hot-tokens discovery — `token trending` was removed in onchainos v2.3.0,
-  // so we only check hot-tokens now (which is what the backtester uses).
-  const hotTokens = await run("onchainos", ["token", "hot-tokens", "--help"]);
-  checks.push({
-    id: "onchainos:hot-tokens",
-    label: "OnchainOS hot-tokens",
-    status: hotTokens.ok ? "ok" : "fail",
-    detail: hotTokens.ok ? "available" : firstLine(hotTokens.stderr || hotTokens.stdout || (hotTokens.error ?? "failed")),
-    fix: hotTokens.ok ? undefined : "Run npm run install:onchainos, open a new terminal, then verify onchainos token hot-tokens --help.",
-  });
-
-  const okxWssEnabled = envBool(env, "OKX_WSS_ENABLED") === true;
-  if (okxWssEnabled) {
-    const wss = await run("onchainos", ["ws", "channel-info", "--chain", "solana", "--channel", "price-info"]);
+  if (robinhoodMode) {
+    const executable = readDexscreenerExecutablePath();
+    const dex = await run(executable, ["--help"]);
     checks.push({
-      id: "onchainos:wss",
-      label: "OnchainOS WSS",
-      status: wss.ok ? "ok" : "fail",
-      detail: wss.ok ? "price-info channel available" : firstLine(wss.stderr || wss.stdout || (wss.error ?? "failed")),
-      fix: wss.ok ? undefined : "Update OnchainOS with npm run install:onchainos, then restart moonbags with the updated PATH.",
+      id: "dexscreener:cli",
+      label: "Dexscreener CLI",
+      status: dex.ok ? "ok" : "fail",
+      detail: dex.ok ? `${executable} available` : dex.error ?? "not found",
+      fix: dex.ok ? undefined : `Install or configure the Dexscreener CLI at ${executable}.`,
     });
   } else {
+    const onchainos = await run("onchainos", ["--version"]);
     checks.push({
-      id: "onchainos:wss",
-      label: "OnchainOS WSS",
-      status: "warn",
-      detail: "disabled (OKX_WSS_ENABLED=false)",
-      fix: "Optional: set OKX_WSS_ENABLED=true to stream open-position market data.",
+      id: "onchainos:version",
+      label: "OnchainOS CLI",
+      status: onchainos.ok ? "ok" : "fail",
+      detail: onchainos.ok ? firstLine(onchainos.stdout || onchainos.stderr) : onchainos.error ?? "not found",
+      fix: onchainos.ok ? undefined : "Run npm run install:onchainos, then export PATH=\"$HOME/.local/bin:$PATH\".",
     });
+
+    const hotTokens = await run("onchainos", ["token", "hot-tokens", "--help"]);
+    checks.push({
+      id: "onchainos:hot-tokens",
+      label: "OnchainOS hot-tokens",
+      status: hotTokens.ok ? "ok" : "fail",
+      detail: hotTokens.ok ? "available" : firstLine(hotTokens.stderr || hotTokens.stdout || (hotTokens.error ?? "failed")),
+      fix: hotTokens.ok ? undefined : "Run npm run install:onchainos, open a new terminal, then verify onchainos token hot-tokens --help.",
+    });
+
+    const okxWssEnabled = envBool(env, "OKX_WSS_ENABLED") === true;
+    if (okxWssEnabled) {
+      const wss = await run("onchainos", ["ws", "channel-info", "--chain", "solana", "--channel", "price-info"]);
+      checks.push({ id: "onchainos:wss", label: "OnchainOS WSS", status: wss.ok ? "ok" : "fail", detail: wss.ok ? "price-info channel available" : firstLine(wss.stderr || wss.stdout || (wss.error ?? "failed")), fix: wss.ok ? undefined : "Update OnchainOS with npm run install:onchainos, then restart moonbags with the updated PATH." });
+    } else {
+      checks.push({ id: "onchainos:wss", label: "OnchainOS WSS", status: "warn", detail: "disabled (OKX_WSS_ENABLED=false)", fix: "Optional: set OKX_WSS_ENABLED=true to stream open-position market data." });
+    }
   }
 
   const pm2 = await run("pm2", ["--version"]);
@@ -407,55 +437,36 @@ export async function runDoctor(options: { network?: boolean } = {}): Promise<Do
     });
   }
 
-  checks.push(...checkEnvVars(env));
+  checks.push(...checkEnvVarsForMode(env, sourceMode));
 
   // Runtime sanity — what sourceMode is persisted, and does it have creds?
   const sourceModeCheck = checkSourceMode(env);
   if (sourceModeCheck) checks.push(sourceModeCheck);
 
   if (network) {
-    if (hasValue(env, "GMGN_API_KEY")) {
-      const gmgn = await probeGmgn(env.GMGN_API_KEY!.trim(), env.GMGN_HOST?.trim());
+    if (robinhoodMode && hasValue(env, "EVM_RPC_URL")) {
+      const rpc = await probeEvmChainId(env.EVM_RPC_URL!.trim());
       checks.push({
-        id: "network:gmgn",
-        label: "GMGN OpenAPI",
-        status: gmgn.ok ? "ok" : "warn",
-        detail: gmgn.detail,
-        fix: gmgn.ok ? undefined : "Verify GMGN_API_KEY is valid and not rate-limit-banned. Check openapi.gmgn.ai reachability.",
-      });
-    }
-
-    if ((env.PRIVATE_SIGNAL_SOURCE?.trim() || "direct") !== "postgres" && hasValue(env, "PRIVATE_SIGNAL_API_URL") && hasValue(env, "PRIVATE_SIGNAL_API_KEY")) {
-      const privateFeed = await fetchOk(env.PRIVATE_SIGNAL_API_URL!.trim(), {
-        headers: {
-          accept: "application/json",
-          authorization: `Bearer ${env.PRIVATE_SIGNAL_API_KEY!.trim()}`,
-        },
-      });
-      checks.push({
-        id: "network:private",
-        label: "Private Feed API",
-        status: privateFeed.ok ? "ok" : "warn",
-        detail: privateFeed.detail,
-        fix: privateFeed.ok ? undefined : "Verify PRIVATE_SIGNAL_API_URL and PRIVATE_SIGNAL_API_KEY are valid.",
-      });
-    }
-
-    const rpcUrl = (env.RPC_URL || "https://beta.helius-rpc.com?api-key=${HELIUS_API_KEY}")
-      .replace("${HELIUS_API_KEY}", env.HELIUS_API_KEY ?? "");
-    if (rpcUrl && hasValue(env, "HELIUS_API_KEY")) {
-      const rpc = await fetchOk(rpcUrl, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", id: "doctor", method: "getHealth" }),
-      });
-      checks.push({
-        id: "network:rpc",
-        label: "Solana RPC",
-        status: rpc.ok ? "ok" : "warn",
+        id: "network:evm-rpc",
+        label: "Robinhood EVM RPC",
+        status: rpc.ok ? "ok" : "fail",
         detail: rpc.detail,
-        fix: rpc.ok ? undefined : "Check HELIUS_API_KEY and RPC_URL in .env.",
+        fix: rpc.ok ? undefined : "Check EVM_RPC_URL and confirm it serves Robinhood Chain ID 4663 (0x1237).",
       });
+    } else if (!robinhoodMode) {
+      if (hasValue(env, "GMGN_API_KEY")) {
+        const gmgn = await probeGmgn(env.GMGN_API_KEY!.trim(), env.GMGN_HOST?.trim());
+        checks.push({ id: "network:gmgn", label: "GMGN OpenAPI", status: gmgn.ok ? "ok" : "warn", detail: gmgn.detail, fix: gmgn.ok ? undefined : "Verify GMGN_API_KEY is valid and not rate-limit-banned. Check openapi.gmgn.ai reachability." });
+      }
+      if ((env.PRIVATE_SIGNAL_SOURCE?.trim() || "direct") !== "postgres" && hasValue(env, "PRIVATE_SIGNAL_API_URL") && hasValue(env, "PRIVATE_SIGNAL_API_KEY")) {
+        const privateFeed = await fetchOk(env.PRIVATE_SIGNAL_API_URL!.trim(), { headers: { accept: "application/json", authorization: "Bearer " + env.PRIVATE_SIGNAL_API_KEY!.trim() } });
+        checks.push({ id: "network:private", label: "Private Feed API", status: privateFeed.ok ? "ok" : "warn", detail: privateFeed.detail, fix: privateFeed.ok ? undefined : "Verify PRIVATE_SIGNAL_API_URL and PRIVATE_SIGNAL_API_KEY are valid." });
+      }
+      const rpcUrl = (env.RPC_URL || "https://beta.helius-rpc.com?api-key=${HELIUS_API_KEY}").replace("${HELIUS_API_KEY}", env.HELIUS_API_KEY ?? "");
+      if (rpcUrl && hasValue(env, "HELIUS_API_KEY")) {
+        const rpc = await fetchOk(rpcUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: "doctor", method: "getHealth" }) });
+        checks.push({ id: "network:rpc", label: "Solana RPC", status: rpc.ok ? "ok" : "warn", detail: rpc.detail, fix: rpc.ok ? undefined : "Check HELIUS_API_KEY and RPC_URL in .env." });
+      }
     }
   }
 

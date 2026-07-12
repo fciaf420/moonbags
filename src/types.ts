@@ -119,6 +119,9 @@ export interface Position {
   /** Peak token price in quote units. */
   peakQuotePrice: number;
 
+  /** Robinhood Dexscreener USD entry price used for relative ticks. */
+  entryUsdPrice?: number;
+
   /** Buy transaction hash (or Solana signature). */
   buyTxHash?: string;
 

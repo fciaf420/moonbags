@@ -25,6 +25,14 @@ const ERC20_ABI = [
   },
 ] as const;
 
+const V2_ROUTER_ABI = [{
+  name: "getAmountsOut",
+  type: "function",
+  stateMutability: "view",
+  inputs: [{ name: "amountIn", type: "uint256" }, { name: "path", type: "address[]" }],
+  outputs: [{ name: "amounts", type: "uint256[]" }],
+}] as const;
+
 export interface RobinhoodEvmClientConfig {
   rpcUrl: string;
   walletAddress: Address;
@@ -68,6 +76,15 @@ export class RobinhoodEvmClient {
       address: tokenAddress,
       abi: ERC20_ABI,
       functionName: "decimals",
+    });
+  }
+
+  async getAmountsOut(router: Address, amountIn: bigint, path: readonly Address[]): Promise<readonly bigint[]> {
+    return this.publicClient.readContract({
+      address: router,
+      abi: V2_ROUTER_ABI,
+      functionName: "getAmountsOut",
+      args: [amountIn, path],
     });
   }
 

@@ -139,6 +139,16 @@ export const CONFIG = ({
   MILESTONES_ENABLED: bool("MILESTONES_ENABLED", true),
   MILESTONE_PCTS: numList("MILESTONE_PCTS", [100, 200, 500, 1000]),
   DRY_RUN,
+  // Robinhood EVM live trading gates (Task 12)
+  ROBINHOOD_LIVE_ENABLED: bool("ROBINHOOD_LIVE_ENABLED", false),
+  ROBINHOOD_MAX_BUY_ETH: num("ROBINHOOD_MAX_BUY_ETH", 0.1),
+  ROBINHOOD_MAX_GAS_GWEI: num("ROBINHOOD_MAX_GAS_GWEI", 100),
+  ROBINHOOD_MIN_ETH_BALANCE: num("ROBINHOOD_MIN_ETH_BALANCE", 0.01),
+  ROBINHOOD_MAX_PRICE_IMPACT: num("ROBINHOOD_MAX_PRICE_IMPACT", 5),
+  ROBINHOOD_QUOTE_DIVERGENCE_PCT: num("ROBINHOOD_QUOTE_DIVERGENCE_PCT", 20),
+  ROBINHOOD_MIN_PAPER_TRADES: num("ROBINHOOD_MIN_PAPER_TRADES", 30),
+  EVM_PRIV_KEY: str("EVM_PRIV_KEY") ?? "",
+  EVM_RPC_URL: str("EVM_RPC_URL") ?? "https://rpc.mainnet.chain.robinhood.com",
 });
 
 // Apply persisted toggles on top of env defaults (must happen after CONFIG is built).

@@ -12,6 +12,8 @@ import { consultLlm, type LlmContext } from "./llmExitAdvisor.js";
 import { getPositionSnapshot } from "./okxClient.js";
 import { getOkxWsOverlay, unwatchOkxWsMint, watchOkxWsMint } from "./okxWsService.js";
 import { getRuntimeSettings, type TpTarget } from "./settingsStore.js";
+import { createRobinhoodAdapter } from "./robinhoodUniswapAdapter.js";
+import { createDexscreenerPriceFetcher, type DexscreenerPriceFetcher } from "./robinhoodPriceFeed.js";
 import {
   appendLlmTradeRecord,
   computeVerdict,
@@ -29,11 +31,50 @@ let realizedPnlSol = 0;
 // Adapter resolution — returns the right TradingAdapter for a chain.
 // Solana → Jupiter; Robinhood → Uniswap (when available).
 // ---------------------------------------------------------------------------
+let robinhoodAdapter: TradingAdapter = createRobinhoodAdapter({
+  rpcUrl: CONFIG.EVM_RPC_URL,
+  walletAddress: "0x0000000000000000000000000000000000000000",
+});
+let robinhoodPriceFetcher: DexscreenerPriceFetcher = createDexscreenerPriceFetcher({
+  executablePath: getRuntimeSettings().signals.dexscreener.executablePath,
+});
+const pausedChains = new Set<SupportedChain>();
+
+export function configureRobinhoodPositionRuntime(deps: {
+  adapter?: TradingAdapter;
+  priceFetcher?: DexscreenerPriceFetcher;
+}): void {
+  if (deps.adapter) robinhoodAdapter = deps.adapter;
+  if (deps.priceFetcher) robinhoodPriceFetcher = deps.priceFetcher;
+}
+
+export function setChainPaused(chain: SupportedChain, paused: boolean): void {
+  if (paused) pausedChains.add(chain); else pausedChains.delete(chain);
+}
+
+export function isChainPaused(chain: SupportedChain): boolean {
+  return pausedChains.has(chain);
+}
+
 function getAdapter(chain?: SupportedChain): TradingAdapter {
-  if (chain === "robinhood") {
-    throw new Error("Robinhood adapter not yet wired — use Solana for now");
+  return chain === "robinhood" ? robinhoodAdapter : getSolanaAdapter();
+}
+
+async function getTrackedBalance(position: Position): Promise<bigint | null> {
+  if (position.chain === "robinhood" && CONFIG.DRY_RUN) return position.tokensHeld;
+  return getAdapter(position.chain).getBalance(position.tokenAddress ?? position.mint);
+}
+
+async function sellTrackedTokens(position: Position, amount: bigint): Promise<{ signature: string; solReceivedLamports: bigint } | null> {
+  if (position.chain !== "robinhood") return sellTokenForSol(position.mint, amount);
+  const adapter = getAdapter("robinhood");
+  if (CONFIG.DRY_RUN) {
+    const quote = await adapter.quoteSell(position.tokenAddress ?? position.mint, amount);
+    if (!quote || quote.quoteReceived <= 0n) return null;
+    return { signature: `dry-run:robinhood:${Date.now()}`, solReceivedLamports: quote.quoteReceived / 1_000_000_000n };
   }
-  return getSolanaAdapter();
+  const sold = await adapter.executeSell(position.tokenAddress ?? position.mint, amount);
+  return sold ? { signature: sold.signature, solReceivedLamports: sold.quoteReceived / 1_000_000_000n } : null;
 }
 
 type CloseReason = "trail" | "stop" | "timeout" | "take_profit" | "manual" | "moonbag_trail" | "moonbag_timeout" | "llm";
@@ -454,6 +495,11 @@ export function adoptPosition(p: Position): void {
   markDirty();
 }
 
+export function resetPositionForTests(mint: string): void {
+  positions.delete(mint);
+  everBoughtMints.delete(mint);
+}
+
 export function dismissPosition(mint: string): { ok: boolean; reason: string } {
   const p = positions.get(mint);
   if (!p) return { ok: false, reason: "not found" };
@@ -514,6 +560,56 @@ export async function openPosition(alert: SignalAlert): Promise<Position | null>
 
   const chain = alert.chain ?? "solana";
   const quoteSym = quoteSymbolForChain(chain);
+  if (isChainPaused(chain)) {
+    logger.warn({ chain, mint: alert.mint }, "[open] chain paused");
+    return null;
+  }
+
+  if (chain === "robinhood") {
+    if (!CONFIG.DRY_RUN) throw new Error("live not enabled: Robinhood signing not implemented");
+    const adapter = getAdapter("robinhood");
+    const tokenAddress = alert.tokenAddress ?? alert.mint;
+    const quoteAmountRaw = BigInt(Math.floor(CONFIG.ETH_BUY_SIZE * 1e18));
+    const buyQuote = await adapter.quoteBuy(tokenAddress, quoteAmountRaw);
+    if (!buyQuote || buyQuote.quoteReceived <= 0n) {
+      logger.warn({ tokenAddress }, "[robinhood] dry-run entry rejected: buy quote unavailable");
+      return null;
+    }
+    const sellQuote = await adapter.quoteSell(tokenAddress, buyQuote.quoteReceived);
+    if (!sellQuote || sellQuote.quoteReceived <= 0n) {
+      logger.warn({ tokenAddress }, "[robinhood] dry-run entry rejected: token is not sellable");
+      return null;
+    }
+    const tokenDecimals = await adapter.getDecimals(tokenAddress);
+    const tokenCount = Number(buyQuote.quoteReceived) / Math.pow(10, tokenDecimals);
+    if (!Number.isFinite(tokenCount) || tokenCount <= 0) return null;
+    const entryQuoteSpent = Number(quoteAmountRaw) / 1e18;
+    const entryQuotePrice = entryQuoteSpent / tokenCount;
+    const entryUsdPrice = await robinhoodPriceFetcher.fetchUsdPrice(tokenAddress);
+    const now = Date.now();
+    const position: Position = {
+      chain, tokenAddress, mint: tokenAddress, name: alert.name, status: "open",
+      entrySig: `dry-run:robinhood:${now}`, quoteSymbol: "ETH", entryQuoteSpent,
+      tokensHeld: buyQuote.quoteReceived, tokenDecimals, entryQuotePrice,
+      currentQuotePrice: entryQuotePrice, peakQuotePrice: entryQuotePrice,
+      entryUsdPrice: entryUsdPrice ?? undefined,
+      buyTxHash: `dry-run:robinhood:${now}`,
+      entrySolSpent: entryQuoteSpent, entryPricePerTokenSol: entryQuotePrice,
+      currentPricePerTokenSol: entryQuotePrice, peakPricePerTokenSol: entryQuotePrice,
+      armed: false, openedAt: now, lastTickAt: now,
+      signalMeta: {
+        alert_mcap: alert.alert_mcap, age_mins: alert.age_mins, holders: alert.holders,
+        bs_ratio: alert.bs_ratio, bundler_pct: alert.bundler_pct, top10_pct: alert.top10_pct,
+        kol_count: alert.kol_count, signal_count: alert.signal_count, rug_ratio: alert.rug_ratio,
+        liq_trend: alert.liq_trend, score: alert.score, source: alert.source ?? "dexscreener",
+      },
+    };
+    positions.set(tokenAddress, position);
+    everBoughtMints.add(tokenAddress);
+    await flushPersist();
+    return position;
+  }
+
   const placeholder: Position = {
     chain,
     tokenAddress: alert.tokenAddress ?? alert.mint,
@@ -636,10 +732,12 @@ export async function tickPositions(): Promise<void> {
   const openPositions = Array.from(positions.values()).filter((p) => p.status === "open");
   if (openPositions.length === 0) return;
 
-  const mints = openPositions.map((p) => p.mint);
-  const batchMints = Array.from(new Set([...mints, SOL_MINT]));
+  const solanaMints = openPositions.filter((p) => p.chain !== "robinhood").map((p) => p.mint);
+  const batchMints = solanaMints.length > 0 ? Array.from(new Set([...solanaMints, SOL_MINT])) : [];
 
-  const priceMap = await getBatchPricesParallel(batchMints).catch(() => new Map<string, number>());
+  const priceMap = batchMints.length > 0
+    ? await getBatchPricesParallel(batchMints).catch(() => new Map<string, number>())
+    : new Map<string, number>();
   const solUsdPrice = priceMap.get(SOL_MINT);
 
   await Promise.all(
@@ -657,15 +755,40 @@ async function tickOne(
   solUsdPrice: number | undefined,
 ): Promise<void> {
   let currentPriceSol: number | null = null;
+  let suppressProfitExits = false;
 
-  const tokenUsdPrice = priceMap.get(position.mint);
-  if (tokenUsdPrice && solUsdPrice && solUsdPrice > 0) {
-    currentPriceSol = tokenUsdPrice / solUsdPrice;
+  if (position.chain === "robinhood") {
+    const tokenAddress = position.tokenAddress ?? position.mint;
+    const usdPrice = await robinhoodPriceFetcher.fetchUsdPrice(tokenAddress);
+    if (usdPrice && position.entryUsdPrice && position.entryUsdPrice > 0) {
+      currentPriceSol = position.entryPricePerTokenSol * (usdPrice / position.entryUsdPrice);
+    }
+    const executable = await getAdapter("robinhood").quoteSell(tokenAddress, position.tokensHeld).catch(() => null);
+    if (!executable || executable.quoteReceived <= 0n) {
+      suppressProfitExits = true;
+      logger.warn({ tokenAddress }, "[robinhood] sell quote unavailable; automatic profit exits suppressed");
+    } else {
+      const tokenCount = Number(position.tokensHeld) / Math.pow(10, position.tokenDecimals);
+      const executablePrice = tokenCount > 0 ? Number(executable.quoteReceived) / 1e18 / tokenCount : 0;
+      if (currentPriceSol === null) currentPriceSol = executablePrice;
+      if (currentPriceSol > 0 && executablePrice > 0) {
+        const divergencePct = Math.abs(executablePrice / currentPriceSol - 1) * 100;
+        if (divergencePct > CONFIG.ROBINHOOD_QUOTE_DIVERGENCE_PCT) {
+          suppressProfitExits = true;
+          logger.warn({ tokenAddress, divergencePct }, "[robinhood] price divergence; automatic profit exits suppressed");
+        }
+      }
+    }
   } else {
-    // fallback: on-chain sell quote — slower but always accurate
-    const quote = await getPriceViaSellQuote(position.mint, position.tokensHeld).catch(() => null);
-    if (quote) {
-      currentPriceSol = (quote.solPerTokenRaw * Math.pow(10, position.tokenDecimals)) / 1e9;
+    const tokenUsdPrice = priceMap.get(position.mint);
+    if (tokenUsdPrice && solUsdPrice && solUsdPrice > 0) {
+      currentPriceSol = tokenUsdPrice / solUsdPrice;
+    } else {
+      // fallback: on-chain sell quote — slower but always accurate
+      const quote = await getPriceViaSellQuote(position.mint, position.tokensHeld).catch(() => null);
+      if (quote) {
+        currentPriceSol = (quote.solPerTokenRaw * Math.pow(10, position.tokenDecimals)) / 1e9;
+      }
     }
   }
 
@@ -790,13 +913,20 @@ async function tickOne(
     reason = "trail";
   }
 
+  if (suppressProfitExits && (reason === "trail" || reason === "take_profit")) {
+    logger.warn({ mint: position.mint, reason }, "[robinhood] automatic profit exit suppressed pending executable quote agreement");
+    reason = null;
+  }
+
   if (reason && position.lastSellAttemptAt && Date.now() - position.lastSellAttemptAt < SELL_RETRY_COOLDOWN_MS) {
     position.lastTickAt = Date.now();
     return;
   }
 
   if (reason) {
-    const confirmQuote = await getPriceViaSellQuote(position.mint, position.tokensHeld).catch(() => null);
+    const confirmQuote = position.chain === "robinhood"
+      ? { solPerTokenRaw: currentPriceSol * 1e9 / Math.pow(10, position.tokenDecimals) }
+      : await getPriceViaSellQuote(position.mint, position.tokensHeld).catch(() => null);
     if (confirmQuote) {
       const confirmedPrice = (confirmQuote.solPerTokenRaw * Math.pow(10, position.tokenDecimals)) / 1e9;
       if (Number.isFinite(confirmedPrice) && confirmedPrice > 0) {
@@ -885,7 +1015,7 @@ async function partialSellForTakeProfit(
   position.lastSellAttemptAt = Date.now();
   markDirty();
 
-  const walletBalance = await getWalletTokenBalance(mint);
+  const walletBalance = await getTrackedBalance(position);
   if (walletBalance === 0n) {
     position.status = "closed";
     position.exitReason = "manual";
@@ -905,7 +1035,7 @@ async function partialSellForTakeProfit(
     return;
   }
 
-  const sellResult = await sellTokenForSol(mint, sellTokens);
+  const sellResult = await sellTrackedTokens(position, sellTokens);
   if (!sellResult) {
     position.status = "open";
     markDirty();
@@ -969,7 +1099,7 @@ async function partialSellAndMoonbag(position: Position, reason: "trail" | "take
   position.lastSellAttemptAt = Date.now();
   markDirty();
 
-  const walletBalance = await getWalletTokenBalance(mint);
+  const walletBalance = await getTrackedBalance(position);
   if (walletBalance === 0n) {
     position.status = "closed";
     position.exitReason = "manual";
@@ -987,7 +1117,7 @@ async function partialSellAndMoonbag(position: Position, reason: "trail" | "take
     return;
   }
 
-  const sellResult = await sellTokenForSol(mint, sellTokens);
+  const sellResult = await sellTrackedTokens(position, sellTokens);
   if (!sellResult) {
     position.status = "open";
     markDirty();
@@ -1088,7 +1218,7 @@ async function partialSellPosition(
   position.lastSellAttemptAt = Date.now();
   markDirty();
 
-  const walletBalance = await getWalletTokenBalance(mint);
+  const walletBalance = await getTrackedBalance(position);
   if (walletBalance === 0n) {
     // Position tokens no longer present — treat as fully closed (manual sell).
     position.status = "closed";
@@ -1110,7 +1240,7 @@ async function partialSellPosition(
     return;
   }
 
-  const sellResult = await sellTokenForSol(mint, sellTokens);
+  const sellResult = await sellTrackedTokens(position, sellTokens);
   if (!sellResult) {
     position.status = "open";
     markDirty();
@@ -1192,7 +1322,7 @@ async function closePosition(mint: string, reason: CloseReason): Promise<void> {
   position.lastSellAttemptAt = Date.now();
   markDirty();
 
-  const walletBalance = await getWalletTokenBalance(mint);
+  const walletBalance = await getTrackedBalance(position);
   if (walletBalance === 0n) {
     position.status = "closed";
     position.exitReason = "manual";
@@ -1211,7 +1341,7 @@ async function closePosition(mint: string, reason: CloseReason): Promise<void> {
   }
 
   const sellAmount = walletBalance ?? position.tokensHeld;
-  const sellResult = await sellTokenForSol(mint, sellAmount);
+  const sellResult = await sellTrackedTokens(position, sellAmount);
   if (!sellResult) {
     const count = (position.sellFailureCount ?? 0) + 1;
     position.sellFailureCount = count;

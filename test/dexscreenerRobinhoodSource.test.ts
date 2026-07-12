@@ -22,3 +22,29 @@ test("cooldown prevents refiring after watch entry is rediscovered", async () =>
   await source.refresh(); now+=1000; await source.refresh(); now+=1000; await source.refresh();
   assert.equal(accepted.length,1);
 });
+
+test("paper journal receives snapshots rejections and acceptances", async () => {
+  let now=1000;
+  const events: Array<{ type: string; reason?: string }> = [];
+  const source=createRobinhoodWatchSource({
+    runner:async()=>JSON.stringify([base]), clock:()=>now,
+    settings:{...settings,minScans:2,minLiquidityUsd:100000},
+    concentration:async()=>({rawTop10Pct:10,adjustedTop10Pct:10,holderCount:200,excludedAddresses:[]}),
+    onPaperEvent:event=>events.push(event),
+  });
+  await source.refresh();
+  now+=1000; await source.refresh();
+  assert.ok(events.some(event=>event.type==="snapshot"));
+  assert.ok(events.some(event=>event.type==="rejected"&&event.reason==="liquidity"));
+
+  const acceptedEvents: Array<{ type: string }> = [];
+  const acceptedSource=createRobinhoodWatchSource({
+    runner:async()=>JSON.stringify([base]), clock:()=>now,
+    settings:{...settings,minH1VolumeAcceleration:0},
+    concentration:async()=>({rawTop10Pct:10,adjustedTop10Pct:10,holderCount:200,excludedAddresses:[]}),
+    onPaperEvent:event=>acceptedEvents.push(event),
+  });
+  await acceptedSource.refresh();
+  now+=1000; await acceptedSource.refresh();
+  assert.ok(acceptedEvents.some(event=>event.type==="accepted"));
+});

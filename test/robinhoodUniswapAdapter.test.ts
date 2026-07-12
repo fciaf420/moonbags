@@ -19,6 +19,7 @@ function mockClient(overrides: {
   ethBalance?: bigint;
   erc20Balance?: bigint;
   erc20Decimals?: number;
+  amountsOut?: readonly bigint[];
   throwOn?: Set<string>;
 }) {
   const throws = overrides.throwOn ?? new Set<string>();
@@ -33,6 +34,7 @@ function mockClient(overrides: {
       if (throws.has("readContract")) throw new Error("RPC down");
       if (args.functionName === "balanceOf") return Promise.resolve(overrides.erc20Balance ?? 0n);
       if (args.functionName === "decimals") return Promise.resolve(overrides.erc20Decimals ?? 18);
+      if (args.functionName === "getAmountsOut") return Promise.resolve(overrides.amountsOut ?? [100n, 250n]);
       throw new Error("unknown function");
     },
     getTransactionReceipt: throws.has("getTransactionReceipt")
@@ -148,36 +150,36 @@ test("isLive returns false by default", () => {
 // Not-implemented methods
 // ---------------------------------------------------------------------------
 
-test("executeBuy throws not implemented", async () => {
+test("executeBuy throws live not enabled when gates fail", async () => {
   const a = makeAdapter();
   await assert.rejects(
     () => a.executeBuy("0xToken1111111111111111111111111111111111", 1000000n),
-    /not implemented/,
+    /live not enabled/,
   );
 });
 
-test("executeSell throws not implemented", async () => {
+test("executeSell throws live not enabled when gates fail", async () => {
   const a = makeAdapter();
   await assert.rejects(
     () => a.executeSell("0xToken1111111111111111111111111111111111", 1000000n) as Promise<unknown>,
-    /not implemented/,
+    /live not enabled/,
   );
 });
 
-test("quoteSell throws not implemented", async () => {
-  const a = makeAdapter();
-  await assert.rejects(
-    () => a.quoteSell("0xToken1111111111111111111111111111111111", 1000000n),
-    /not implemented/,
-  );
+test("quoteSell reads token to WETH output from V2 Router", async () => {
+  const a = makeAdapter({ amountsOut: [1_000_000n, 42_000n] });
+  assert.deepEqual(await a.quoteSell("0x1111111111111111111111111111111111111111", 1_000_000n), {
+    quoteReceived: 42_000n,
+    priceImpactPct: 0,
+  });
 });
 
-test("quoteBuy throws not implemented", async () => {
-  const a = makeAdapter();
-  await assert.rejects(
-    () => a.quoteBuy("0xToken1111111111111111111111111111111111", 1000000n),
-    /not implemented/,
-  );
+test("quoteBuy reads WETH to token output from V2 Router", async () => {
+  const a = makeAdapter({ amountsOut: [1_000_000n, 84_000n] });
+  assert.deepEqual(await a.quoteBuy("0x1111111111111111111111111111111111111111", 1_000_000n), {
+    quoteReceived: 84_000n,
+    priceImpactPct: 0,
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -20,6 +20,7 @@ import { startGmgnSignalSource, stopGmgnSignalSource } from "./gmgnSignalSource.
 import { CONFIG } from "./config.js";
 import { consultEntry } from "./llmEntryAdvisor.js";
 import logger from "./logger.js";
+import { getRuntimeSettings } from "./settingsStore.js";
 
 async function main(): Promise<void> {
   logger.info(
@@ -29,7 +30,11 @@ async function main(): Promise<void> {
 
   await loadPersistedPositions();
   await loadPollerState();
-  await unwrapResidualWsol().catch((err) => logger.warn({ err: String(err) }, "[wsol] boot-time unwrap failed"));
+  const sourceMode = getRuntimeSettings().signals.sourceMode;
+  const robinhoodMode = sourceMode.startsWith("dexscreener_");
+  if (!robinhoodMode) {
+    await unwrapResidualWsol().catch((err) => logger.warn({ err: String(err) }, "[wsol] boot-time unwrap failed"));
+  }
 
   let tickInFlight = false;
   let tickQueued = false;
@@ -55,14 +60,16 @@ async function main(): Promise<void> {
     })();
   };
 
-  startOkxWsService({
-    onMintEvent: (mint) => {
-      logger.debug({ mint }, "[okx-wss] event woke position tick");
-      requestPositionTick("okx-wss");
-    },
-  });
-  for (const position of getPositions().filter((p) => p.status === "open")) {
-    void watchOkxWsMint(position.mint);
+  if (!robinhoodMode) {
+    startOkxWsService({
+      onMintEvent: (mint) => {
+        logger.debug({ mint }, "[okx-wss] event woke position tick");
+        requestPositionTick("okx-wss");
+      },
+    });
+    for (const position of getPositions().filter((p) => p.status === "open" && p.chain !== "robinhood")) {
+      void watchOkxWsMint(position.mint);
+    }
   }
   startOkxDiscoverySource({
     onAcceptedCandidate: async (alert) => {
@@ -97,7 +104,15 @@ async function main(): Promise<void> {
     },
   });
   startDexscreenerRobinhoodSource({
-    onAcceptedCandidate: (alert) => dispatchRobinhoodWatchCandidate(alert, { notify: notifyRobinhoodCandidate }),
+    onAcceptedCandidate: (alert) => {
+      const mode = getRuntimeSettings().signals.sourceMode;
+      const live = mode === "dexscreener_live" || mode === "dexscreener_only";
+      return dispatchRobinhoodWatchCandidate(alert, {
+        mode: live ? "live" : "watch",
+        notify: notifyRobinhoodCandidate,
+        openPosition,
+      });
+    },
   });
 
   const stopServer = startServer();

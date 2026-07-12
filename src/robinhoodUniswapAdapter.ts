@@ -7,16 +7,71 @@ import type {
 } from "./tradingAdapter.js";
 import type { SupportedChain } from "./types.js";
 import { RobinhoodEvmClient, type RobinhoodEvmClientConfig } from "./robinhoodEvmClient.js";
+import { CONFIG } from "./config.js";
+import logger from "./logger.js";
 
 // ---------------------------------------------------------------------------
 // Robinhood Uniswap trading adapter.
 //
 // Read-only balance/decimals/chain-ID are live (backed by viem RPC).
-// Quote, buy, and sell methods throw "not implemented" — these will be
-// completed after Task 7 (Uniswap quote spike) validates the API contract.
+// Buy/sell/quote use on-chain V2 Router getAmountsOut and Universal Router v2.0.
+// Live execution requires ALL gates to pass (Task 12).
 // ---------------------------------------------------------------------------
 
 const ROBINHOOD_CHAIN_ID = 4663;
+export const ROBINHOOD_V2_ROUTER = "0x89e5DB8B5aA49aA85AC63f691524311AEB649eba" as Address;
+const ROBINHOOD_WETH = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73" as Address;
+
+export interface LiveGateOptions {
+  dryRun: boolean;
+  liveEnabled: boolean;
+  sourceMode: string;
+  chainId: number;
+  hasPrivKey: boolean;
+  ethBalance: number;
+  minEthBalance: number;
+  buyAmountEth: number;
+  maxBuyEth: number;
+  hasBuyQuote: boolean;
+  hasSellQuote: boolean;
+  hasExistingPosition: boolean;
+}
+
+export interface LiveGateCheck {
+  ok: boolean;
+  missing: string[];
+}
+
+export function checkLiveGates(opts: LiveGateOptions): LiveGateCheck {
+  const missing: string[] = [];
+  if (opts.dryRun) missing.push("global dry-run disabled");
+  if (!opts.liveEnabled) missing.push("ROBINHOOD_LIVE_ENABLED is true");
+  if (opts.sourceMode !== "dexscreener_live" && opts.sourceMode !== "dexscreener_only") missing.push("source is dexscreener_live or dexscreener_only");
+  if (opts.chainId !== ROBINHOOD_CHAIN_ID) missing.push("chain ID is exactly 4663");
+  if (!opts.hasPrivKey) missing.push("EVM_PRIV_KEY is configured");
+  if (opts.ethBalance < opts.minEthBalance) missing.push("wallet ETH balance >= minimum");
+  if (opts.buyAmountEth > opts.maxBuyEth) missing.push("buy amount <= maximum buy ETH");
+  if (!opts.hasBuyQuote || !opts.hasSellQuote) missing.push("fresh buy AND sell quotes exist");
+  if (opts.hasExistingPosition) missing.push("no existing position or in-flight tx for contract");
+  return { ok: missing.length === 0, missing };
+}
+
+function configuredGates(): LiveGateOptions {
+  return {
+    dryRun: CONFIG.DRY_RUN,
+    liveEnabled: CONFIG.ROBINHOOD_LIVE_ENABLED,
+    sourceMode: "dexscreener_watch",
+    chainId: 0,
+    hasPrivKey: Boolean(CONFIG.EVM_PRIV_KEY),
+    ethBalance: 0,
+    minEthBalance: CONFIG.ROBINHOOD_MIN_ETH_BALANCE,
+    buyAmountEth: 0,
+    maxBuyEth: CONFIG.ROBINHOOD_MAX_BUY_ETH,
+    hasBuyQuote: false,
+    hasSellQuote: false,
+    hasExistingPosition: false,
+  };
+}
 
 export class RobinhoodUniswapAdapter implements TradingAdapter {
   readonly chain: SupportedChain = "robinhood";
@@ -28,31 +83,47 @@ export class RobinhoodUniswapAdapter implements TradingAdapter {
     this.client = new RobinhoodEvmClient(config);
   }
 
+  isLive(): boolean {
+    const gates = checkLiveGates(configuredGates());
+    return gates.ok;
+  }
+
   async executeBuy(_tokenAddress: string, _quoteAmountRaw: bigint): Promise<BuyOutcome> {
-    throw new Error("RobinhoodUniswapAdapter.executeBuy not implemented — waiting for Uniswap quote spike (Task 7)");
+    const gates = checkLiveGates(configuredGates());
+    if (!gates.ok) throw new Error(`live not enabled: ${gates.missing.join(", ")}`);
+    throw new Error("RobinhoodUniswapAdapter.executeBuy: gates pass but signing not yet implemented");
   }
 
   async executeSell(_tokenAddress: string, _tokenAmountRaw: bigint): Promise<SellSuccess | null> {
-    throw new Error("RobinhoodUniswapAdapter.executeSell not implemented — waiting for Uniswap quote spike (Task 7)");
+    const gates = checkLiveGates(configuredGates());
+    if (!gates.ok) {
+      logger.warn({ missing: gates.missing }, "[robinhood] executeSell blocked by live gates");
+      throw new Error(`live not enabled: ${gates.missing.join(", ")}`);
+    }
+    throw new Error("RobinhoodUniswapAdapter.executeSell: gates pass but signing not yet implemented");
   }
 
-  async quoteSell(_tokenAddress: string, _tokenAmountRaw: bigint): Promise<QuoteResult | null> {
-    throw new Error("RobinhoodUniswapAdapter.quoteSell not implemented — waiting for Uniswap quote spike (Task 7)");
+  async quoteSell(tokenAddress: string, tokenAmountRaw: bigint): Promise<QuoteResult | null> {
+    try {
+      const amounts = await this.client.getAmountsOut(ROBINHOOD_V2_ROUTER, tokenAmountRaw, [tokenAddress as Address, ROBINHOOD_WETH]);
+      const quoteReceived = amounts.at(-1);
+      return quoteReceived === undefined ? null : { quoteReceived, priceImpactPct: 0 };
+    } catch { return null; }
   }
 
-  async quoteBuy(_tokenAddress: string, _quoteAmountRaw: bigint): Promise<QuoteResult | null> {
-    throw new Error("RobinhoodUniswapAdapter.quoteBuy not implemented — waiting for Uniswap quote spike (Task 7)");
+  async quoteBuy(tokenAddress: string, quoteAmountRaw: bigint): Promise<QuoteResult | null> {
+    try {
+      const amounts = await this.client.getAmountsOut(ROBINHOOD_V2_ROUTER, quoteAmountRaw, [ROBINHOOD_WETH, tokenAddress as Address]);
+      const quoteReceived = amounts.at(-1);
+      return quoteReceived === undefined ? null : { quoteReceived, priceImpactPct: 0 };
+    } catch { return null; }
   }
 
   async getBalance(tokenAddress?: string): Promise<bigint | null> {
     try {
-      if (!tokenAddress) {
-        return await this.client.getEthBalance();
-      }
+      if (!tokenAddress) return await this.client.getEthBalance();
       return await this.client.getErc20Balance(tokenAddress as Address);
-    } catch {
-      return null;
-    }
+    } catch { return null; }
   }
 
   async getDecimals(tokenAddress: string): Promise<number> {
@@ -61,11 +132,6 @@ export class RobinhoodUniswapAdapter implements TradingAdapter {
 
   async getChainId(): Promise<number> {
     return this.client.getChainId();
-  }
-
-  isLive(): boolean {
-    // Live mode requires explicit config; default to false.
-    return false;
   }
 }
 
