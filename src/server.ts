@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONFIG } from "./config.js";
 import logger from "./logger.js";
-import { forceClosePosition, getPositions, getStats, getClosedTrades, getSignalStats, type SignalStats } from "./positionManager.js";
+import { forceClosePosition, getPositions, getStats, getClosedTrades, getSignalStats, usesSolanaPositionMonitoring, type SignalStats } from "./positionManager.js";
 import { getRecentAlertEvents } from "./privateSignalPoller.js";
 import { getTokenInfos } from "./jupTokensClient.js";
 import { getKline } from "./okxClient.js";
@@ -67,8 +67,8 @@ async function buildState(): Promise<Record<string, unknown>> {
   // Cached at the client so repeated dashboard polls only hit Jupiter at most once
   // per minute per mint.
   const enrichMints = Array.from(new Set([
-    ...positions.map((p) => p.mint),
-    ...alerts.filter((a) => a.action === "fired").slice(0, 20).map((a) => a.mint),
+    ...positions.filter((p) => usesSolanaPositionMonitoring(p.chain)).map((p) => p.mint),
+    ...alerts.filter((a) => a.action === "fired" && !/^0x[0-9a-f]{40}$/i.test(a.mint)).slice(0, 20).map((a) => a.mint),
   ]));
   const tokenInfos = enrichMints.length > 0
     ? await getTokenInfos(enrichMints).catch(() => new Map())
@@ -80,7 +80,9 @@ async function buildState(): Promise<Record<string, unknown>> {
   // Per-position 1m kline closes — powers the real mini price chart in the UI.
   // okxClient caches each mint's kline for ~5s so repeated dashboard polls share the
   // same underlying CLI call as the LLM advisor when it's running.
-  const openMints = positions.filter((p) => p.status === "open").map((p) => p.mint);
+  const openMints = positions
+    .filter((p) => p.status === "open" && usesSolanaPositionMonitoring(p.chain))
+    .map((p) => p.mint);
   const klineByMint: Record<string, number[]> = {};
   if (openMints.length > 0) {
     const results = await Promise.all(
