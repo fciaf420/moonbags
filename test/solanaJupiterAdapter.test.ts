@@ -1,6 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+// Set required env vars before any imports that touch config.
+process.env.JUP_API_KEY = "test-key";
+process.env.HELIUS_API_KEY = "test-helius-key";
+process.env.DRY_RUN = "true";
+process.env.PRIV_B58 = ""; // empty so DRY_RUN skips the key check
+
 // ---------------------------------------------------------------------------
 // Characterization tests for SolanaJupiterAdapter.
 //
