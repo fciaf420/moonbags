@@ -61,6 +61,10 @@ function getAdapter(chain?: SupportedChain): TradingAdapter {
   return chain === "robinhood" ? robinhoodAdapter : getSolanaAdapter();
 }
 
+export function usesSolanaPositionMonitoring(chain?: SupportedChain): boolean {
+  return chain !== "robinhood";
+}
+
 async function getTrackedBalance(position: Position): Promise<bigint | null> {
   if (position.chain === "robinhood" && CONFIG.DRY_RUN) return position.tokensHeld;
   return getAdapter(position.chain).getBalance(position.tokenAddress ?? position.mint);
@@ -701,7 +705,7 @@ export async function openPosition(alert: SignalAlert): Promise<Position | null>
   positions.set(alert.mint, position);
   everBoughtMints.add(alert.mint);
   await flushPersist();
-  void watchOkxWsMint(alert.mint);
+  if (usesSolanaPositionMonitoring(chain)) void watchOkxWsMint(alert.mint);
 
   logger.info(
     {
@@ -1454,7 +1458,8 @@ async function closePosition(mint: string, reason: CloseReason): Promise<void> {
 }
 
 function scheduleCleanup(mint: string): void {
-  void unwatchOkxWsMint(mint);
+  const position = positions.get(mint);
+  if (usesSolanaPositionMonitoring(position?.chain)) void unwatchOkxWsMint(mint);
   setTimeout(() => {
     const p = positions.get(mint);
     if (p && (p.status === "closed" || p.status === "failed")) {
@@ -1479,6 +1484,7 @@ export async function tickLlmAdvisor(): Promise<void> {
   const llmPollMs = CONFIG.LLM_POLL_MS;
   const candidates = Array.from(positions.values()).filter((p) =>
     p.status === "open" &&
+    usesSolanaPositionMonitoring(p.chain) &&
     (CONFIG.LLM_EXIT_IMMEDIATE || p.armed) &&
     !p.moonbagMode &&    // moonbag is disabled when LLM is on, but defensive
     (!p.lastLlmCheckAt || Date.now() - p.lastLlmCheckAt >= llmPollMs),

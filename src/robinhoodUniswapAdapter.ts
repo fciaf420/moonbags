@@ -116,7 +116,7 @@ export class RobinhoodUniswapAdapter implements TradingAdapter {
 
   private async quote(tokenIn: string, tokenOut: string, amount: bigint): Promise<QuoteResult | null> {
     if (!this.apiKey) return null;
-    const response = await this.fetcher(UNISWAP_QUOTE_URL, {
+    const init: RequestInit = {
       method: "POST",
       headers: { "x-api-key": this.apiKey, "Content-Type": "application/json", Accept: "application/json" },
       body: JSON.stringify({
@@ -129,11 +129,22 @@ export class RobinhoodUniswapAdapter implements TradingAdapter {
         swapper: this.walletAddress,
         slippageTolerance: 0.5,
       }),
-    });
-    if (!response.ok) return null;
-    const result = await response.json() as { quote?: { output?: { amount?: string }, priceImpact?: number } };
-    const output = result.quote?.output?.amount;
-    return output ? { quoteReceived: BigInt(output), priceImpactPct: result.quote?.priceImpact ?? 0 } : null;
+    };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const response = await this.fetcher(UNISWAP_QUOTE_URL, init);
+        if (!response.ok) {
+          if (attempt === 0 && (response.status === 429 || response.status >= 500)) continue;
+          return null;
+        }
+        const result = await response.json() as { quote?: { output?: { amount?: string }, priceImpact?: number } };
+        const output = result.quote?.output?.amount;
+        return output ? { quoteReceived: BigInt(output), priceImpactPct: result.quote?.priceImpact ?? 0 } : null;
+      } catch {
+        if (attempt === 1) return null;
+      }
+    }
+    return null;
   }
 
   async quoteSell(tokenAddress: string, tokenAmountRaw: bigint): Promise<QuoteResult | null> {

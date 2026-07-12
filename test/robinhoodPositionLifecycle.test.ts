@@ -10,6 +10,7 @@ import {
   resetPositionForTests,
   setChainPaused,
   tickPositions,
+  usesSolanaPositionMonitoring,
 } from "../src/positionManager.js";
 import { getRuntimeSettings, updateRuntimeSettings } from "../src/settingsStore.js";
 
@@ -55,6 +56,11 @@ function reset(): void {
     },
   });
 }
+
+test("Robinhood positions never use Solana OKX monitoring", () => {
+  assert.equal(usesSolanaPositionMonitoring("robinhood"), false);
+  assert.equal(usesSolanaPositionMonitoring("solana"), true);
+});
 
 test("Robinhood dry-run entry requires a reverse sell quote", { concurrency: false }, async () => {
   reset();

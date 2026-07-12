@@ -208,6 +208,21 @@ test("quoteBuy requests an official Uniswap API quote on Robinhood Chain", async
   });
 });
 
+test("quoteSell retries one transient Uniswap API failure", async () => {
+  let attempts = 0;
+  const fetcher: typeof fetch = async () => {
+    attempts++;
+    if (attempts === 1) return new Response("temporary", { status: 503 });
+    return new Response(JSON.stringify({ quote: { output: { amount: "42000" } } }), { status: 200 });
+  };
+  const a = makeAdapter({}, fetcher);
+  assert.deepEqual(await a.quoteSell("0x1111111111111111111111111111111111111111", 1_000_000n), {
+    quoteReceived: 42_000n,
+    priceImpactPct: 0,
+  });
+  assert.equal(attempts, 2);
+});
+
 // ---------------------------------------------------------------------------
 // validateRobinhoodChain utility
 // ---------------------------------------------------------------------------
