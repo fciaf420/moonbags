@@ -161,6 +161,7 @@ export const CONFIG = ({
   ROBINHOOD_MIN_PAPER_TRADES: num("ROBINHOOD_MIN_PAPER_TRADES", 30),
   EVM_PRIV_KEY: str("EVM_PRIV_KEY") ?? "",
   EVM_RPC_URL: str("EVM_RPC_URL") ?? "https://rpc.mainnet.chain.robinhood.com",
+  UNISWAP_API_KEY: str("UNISWAP_API_KEY") ?? "",
 });
 
 // Apply persisted toggles on top of env defaults (must happen after CONFIG is built).

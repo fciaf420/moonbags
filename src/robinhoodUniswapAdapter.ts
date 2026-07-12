@@ -14,13 +14,18 @@ import logger from "./logger.js";
 // Robinhood Uniswap trading adapter.
 //
 // Read-only balance/decimals/chain-ID are live (backed by viem RPC).
-// Buy/sell/quote use on-chain V2 Router getAmountsOut and Universal Router v2.0.
+// Quotes use the official Uniswap Trading API across supported protocols.
 // Live execution requires ALL gates to pass (Task 12).
 // ---------------------------------------------------------------------------
 
 const ROBINHOOD_CHAIN_ID = 4663;
-export const ROBINHOOD_V2_ROUTER = "0x89e5DB8B5aA49aA85AC63f691524311AEB649eba" as Address;
-const ROBINHOOD_WETH = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73" as Address;
+const NATIVE_ETH = "0x0000000000000000000000000000000000000000";
+const UNISWAP_QUOTE_URL = "https://trade-api.gateway.uniswap.org/v1/quote";
+
+export interface RobinhoodUniswapAdapterConfig extends RobinhoodEvmClientConfig {
+  apiKey?: string;
+  fetcher?: typeof fetch;
+}
 
 export interface LiveGateOptions {
   dryRun: boolean;
@@ -78,9 +83,15 @@ export class RobinhoodUniswapAdapter implements TradingAdapter {
   readonly quoteSymbol = "ETH";
 
   private client: RobinhoodEvmClient;
+  private readonly apiKey: string;
+  private readonly fetcher: typeof fetch;
+  private readonly walletAddress: Address;
 
-  constructor(config: RobinhoodEvmClientConfig) {
+  constructor(config: RobinhoodUniswapAdapterConfig) {
     this.client = new RobinhoodEvmClient(config);
+    this.apiKey = config.apiKey ?? "";
+    this.fetcher = config.fetcher ?? fetch;
+    this.walletAddress = config.walletAddress;
   }
 
   isLive(): boolean {
@@ -103,20 +114,36 @@ export class RobinhoodUniswapAdapter implements TradingAdapter {
     throw new Error("RobinhoodUniswapAdapter.executeSell: gates pass but signing not yet implemented");
   }
 
+  private async quote(tokenIn: string, tokenOut: string, amount: bigint): Promise<QuoteResult | null> {
+    if (!this.apiKey) return null;
+    const response = await this.fetcher(UNISWAP_QUOTE_URL, {
+      method: "POST",
+      headers: { "x-api-key": this.apiKey, "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({
+        tokenIn,
+        tokenOut,
+        tokenInChainId: ROBINHOOD_CHAIN_ID,
+        tokenOutChainId: ROBINHOOD_CHAIN_ID,
+        type: "EXACT_INPUT",
+        amount: amount.toString(),
+        swapper: this.walletAddress,
+        slippageTolerance: 0.5,
+      }),
+    });
+    if (!response.ok) return null;
+    const result = await response.json() as { quote?: { output?: { amount?: string }, priceImpact?: number } };
+    const output = result.quote?.output?.amount;
+    return output ? { quoteReceived: BigInt(output), priceImpactPct: result.quote?.priceImpact ?? 0 } : null;
+  }
+
   async quoteSell(tokenAddress: string, tokenAmountRaw: bigint): Promise<QuoteResult | null> {
-    try {
-      const amounts = await this.client.getAmountsOut(ROBINHOOD_V2_ROUTER, tokenAmountRaw, [tokenAddress as Address, ROBINHOOD_WETH]);
-      const quoteReceived = amounts.at(-1);
-      return quoteReceived === undefined ? null : { quoteReceived, priceImpactPct: 0 };
-    } catch { return null; }
+    try { return await this.quote(tokenAddress, NATIVE_ETH, tokenAmountRaw); }
+    catch { return null; }
   }
 
   async quoteBuy(tokenAddress: string, quoteAmountRaw: bigint): Promise<QuoteResult | null> {
-    try {
-      const amounts = await this.client.getAmountsOut(ROBINHOOD_V2_ROUTER, quoteAmountRaw, [ROBINHOOD_WETH, tokenAddress as Address]);
-      const quoteReceived = amounts.at(-1);
-      return quoteReceived === undefined ? null : { quoteReceived, priceImpactPct: 0 };
-    } catch { return null; }
+    try { return await this.quote(NATIVE_ETH, tokenAddress, quoteAmountRaw); }
+    catch { return null; }
   }
 
   async getBalance(tokenAddress?: string): Promise<bigint | null> {
@@ -139,6 +166,7 @@ export class RobinhoodUniswapAdapter implements TradingAdapter {
 export function createRobinhoodAdapter(config: {
   rpcUrl: string;
   walletAddress: Address;
+  apiKey?: string;
 }): RobinhoodUniswapAdapter {
   return new RobinhoodUniswapAdapter(config);
 }

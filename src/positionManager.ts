@@ -33,7 +33,8 @@ let realizedPnlSol = 0;
 // ---------------------------------------------------------------------------
 let robinhoodAdapter: TradingAdapter = createRobinhoodAdapter({
   rpcUrl: CONFIG.EVM_RPC_URL,
-  walletAddress: "0x0000000000000000000000000000000000000000",
+  walletAddress: "0x000000000000000000000000000000000000dEaD",
+  apiKey: CONFIG.UNISWAP_API_KEY,
 });
 let robinhoodPriceFetcher: DexscreenerPriceFetcher = createDexscreenerPriceFetcher({
   executablePath: getRuntimeSettings().signals.dexscreener.executablePath,

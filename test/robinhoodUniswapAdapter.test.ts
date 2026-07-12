@@ -43,10 +43,12 @@ function mockClient(overrides: {
   };
 }
 
-function makeAdapter(overrides: Parameters<typeof mockClient>[0] = {}) {
+function makeAdapter(overrides: Parameters<typeof mockClient>[0] = {}, fetcher?: typeof fetch) {
   const adapter = new RobinhoodUniswapAdapter({
     rpcUrl: "http://localhost:8545",
     walletAddress: "0xDD5690e04BcAC0f06e405362e0B3BadB92DAe711",
+    apiKey: "test-key",
+    fetcher,
   });
   // Reach into the private client and replace publicClient with our mock.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -166,19 +168,43 @@ test("executeSell throws live not enabled when gates fail", async () => {
   );
 });
 
-test("quoteSell reads token to WETH output from V2 Router", async () => {
-  const a = makeAdapter({ amountsOut: [1_000_000n, 42_000n] });
-  assert.deepEqual(await a.quoteSell("0x1111111111111111111111111111111111111111", 1_000_000n), {
-    quoteReceived: 42_000n,
-    priceImpactPct: 0,
+test("quoteSell requests a reverse Uniswap API quote on Robinhood Chain", async () => {
+  let body: Record<string,unknown> = {};
+  const fetcher: typeof fetch = async (_url, init) => {
+    body=JSON.parse(String(init?.body));
+    return new Response(JSON.stringify({ routing:"CLASSIC", quote:{ output:{ amount:"42000" }, priceImpact:2.5 } }),{status:200});
+  };
+  const a=makeAdapter({},fetcher);
+  assert.deepEqual(await a.quoteSell("0x1111111111111111111111111111111111111111",1_000_000n),{
+    quoteReceived:42_000n,
+    priceImpactPct:2.5,
   });
+  assert.equal(body.tokenIn,"0x1111111111111111111111111111111111111111");
+  assert.equal(body.tokenOut,"0x0000000000000000000000000000000000000000");
+  assert.equal(body.amount,"1000000");
 });
 
-test("quoteBuy reads WETH to token output from V2 Router", async () => {
-  const a = makeAdapter({ amountsOut: [1_000_000n, 84_000n] });
+test("quoteBuy requests an official Uniswap API quote on Robinhood Chain", async () => {
+  let request: RequestInit | undefined;
+  const fetcher: typeof fetch = async (_url, init) => {
+    request = init;
+    return new Response(JSON.stringify({ routing: "CLASSIC", quote: { output: { amount: "84000" }, priceImpact: 1.25 } }), { status: 200 });
+  };
+  const a = makeAdapter({}, fetcher);
   assert.deepEqual(await a.quoteBuy("0x1111111111111111111111111111111111111111", 1_000_000n), {
     quoteReceived: 84_000n,
-    priceImpactPct: 0,
+    priceImpactPct: 1.25,
+  });
+  assert.equal((request?.headers as Record<string,string>)["x-api-key"], "test-key");
+  assert.deepEqual(JSON.parse(String(request?.body)), {
+    tokenIn: "0x0000000000000000000000000000000000000000",
+    tokenOut: "0x1111111111111111111111111111111111111111",
+    tokenInChainId: 4663,
+    tokenOutChainId: 4663,
+    type: "EXACT_INPUT",
+    amount: "1000000",
+    swapper: "0xDD5690e04BcAC0f06e405362e0B3BadB92DAe711",
+    slippageTolerance: 0.5,
   });
 });
 
