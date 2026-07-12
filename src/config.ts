@@ -50,6 +50,20 @@ function resolveRpcUrl(): string {
   return raw.replace("${HELIUS_API_KEY}", helius);
 }
 
+function persistedSourceMode(): string {
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(process.cwd(), "state/settings.json"), "utf8")) as { signals?: { sourceMode?: string } };
+    return raw.signals?.sourceMode ?? "private_only";
+  } catch {
+    return "private_only";
+  }
+}
+
+export function requiredSolanaEnvForMode(sourceMode: string, env: Record<string, string | undefined>): string[] {
+  if (sourceMode.startsWith("dexscreener_")) return [];
+  return ["JUP_API_KEY", "HELIUS_API_KEY", "PRIV_B58"].filter((key) => !env[key]);
+}
+
 const DRY_RUN = bool("DRY_RUN", true);
 const APP_ROLE = str("APP_ROLE") ?? "bot";
 
@@ -62,9 +76,7 @@ const DATABASE_URL = str("DATABASE_URL");
 
 const missing: string[] = [];
 if (APP_ROLE !== "private-signal-relay") {
-  if (!JUP_API_KEY) missing.push("JUP_API_KEY");
-  if (!HELIUS_API_KEY) missing.push("HELIUS_API_KEY");
-  if (!PRIV_B58) missing.push("PRIV_B58");
+  missing.push(...requiredSolanaEnvForMode(persistedSourceMode(), process.env));
 }
 
 if (missing.length > 0) {
