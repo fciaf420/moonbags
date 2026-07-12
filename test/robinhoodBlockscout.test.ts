@@ -20,3 +20,16 @@ test("holder fetch follows pagination with a bounded page count",async()=>{
  const result=await fetchHolderConcentration("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",{fetcher,baseUrl:"https://example.test",maxPages:2,totalSupply:1000});
  assert.equal(calls,2); assert.equal(result.rawTop10Pct,90);
 });
+
+test("holder fetch obtains total supply from Blockscout token metadata",async()=>{
+ const urls:string[]=[];
+ const fetcher:typeof fetch=async(input)=>{
+  const url=String(input); urls.push(url);
+  if(url.endsWith("/api/v2/tokens/0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")) return new Response(JSON.stringify({total_supply:"1000"}),{status:200});
+  return new Response(JSON.stringify({items:holders,next_page_params:null}),{status:200});
+ };
+ const result=await fetchHolderConcentration("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",{fetcher,baseUrl:"https://example.test",maxPages:1});
+ assert.equal(result.rawTop10Pct,90);
+ assert.equal(result.holderCount,4);
+ assert.equal(urls.length,2);
+});

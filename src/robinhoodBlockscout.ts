@@ -16,12 +16,18 @@ export function calculateHolderConcentration(holders:BlockscoutHolder[],totalSup
  const excludedAddresses=sorted.filter(excluded).map(h=>(h.address?.hash??"").toLowerCase());
  return {rawTop10Pct:pct(sorted),adjustedTop10Pct:pct(sorted.filter(h=>!excluded(h))),holderCount:holders.length,excludedAddresses};
 }
-export async function fetchHolderConcentration(tokenAddress:string,opts:{fetcher?:typeof fetch;baseUrl?:string;maxPages?:number;timeoutMs?:number;totalSupply:number}):Promise<HolderConcentration>{
+export async function fetchHolderConcentration(tokenAddress:string,opts:{fetcher?:typeof fetch;baseUrl?:string;maxPages?:number;timeoutMs?:number;totalSupply?:number}):Promise<HolderConcentration>{
  const fetcher=opts.fetcher??fetch, base=(opts.baseUrl??"https://explorer.robinhoodchain.com").replace(/\/$/,""); const max=opts.maxPages??5; const rows:BlockscoutHolder[]=[]; let params="";
+ let totalSupply=opts.totalSupply;
+ if(totalSupply===undefined){
+  const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),opts.timeoutMs??10000);
+  try { const res=await fetcher(`${base}/api/v2/tokens/${tokenAddress}`,{signal:controller.signal}); if(!res.ok) throw new Error(`Blockscout token HTTP ${res.status}`); const body=await res.json() as {total_supply?:string}; totalSupply=Number(body.total_supply); if(!Number.isFinite(totalSupply)||totalSupply<=0) throw new Error("Blockscout token total supply unavailable"); }
+  finally { clearTimeout(timer); }
+ }
  for(let page=0;page<max;page++){
   const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),opts.timeoutMs??10000);
   try { const res=await fetcher(`${base}/api/v2/tokens/${tokenAddress}/holders${params}`,{signal:controller.signal}); if(!res.ok) throw new Error(`Blockscout holders HTTP ${res.status}`); const body=await res.json() as {items?:BlockscoutHolder[];next_page_params?:Record<string,unknown>|null}; rows.push(...(body.items??[])); if(!body.next_page_params) break; params=`?${new URLSearchParams(Object.entries(body.next_page_params).map(([k,v]): [string, string]=>[k,String(v)])).toString()}`; }
   finally { clearTimeout(timer); }
  }
- return calculateHolderConcentration(rows,opts.totalSupply);
+ return calculateHolderConcentration(rows,totalSupply);
 }

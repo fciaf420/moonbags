@@ -48,3 +48,32 @@ test("paper journal receives snapshots rejections and acceptances", async () => 
   now+=1000; await acceptedSource.refresh();
   assert.ok(acceptedEvents.some(event=>event.type==="accepted"));
 });
+
+test("rejects candidate when verified Blockscout holder count is below threshold", async () => {
+  let now=1000;
+  const events: Array<{ type: string; reason?: string }> = [];
+  const source=createRobinhoodWatchSource({
+    runner:async()=>JSON.stringify([base]), clock:()=>now,
+    settings:{...settings,minH1VolumeAcceleration:0},
+    concentration:async()=>({rawTop10Pct:10,adjustedTop10Pct:10,holderCount:99,excludedAddresses:[]}),
+    onPaperEvent:event=>events.push(event),
+  });
+  await source.refresh();
+  now+=1000; await source.refresh();
+  assert.ok(events.some(event=>event.type==="rejected"&&event.reason==="verified holders"));
+  assert.equal(source.status().candidatesAccepted,0);
+});
+
+test("uses verified Blockscout holders instead of stale CLI holder count", async () => {
+  let now=1000;
+  const accepted:string[]=[];
+  const source=createRobinhoodWatchSource({
+    runner:async()=>JSON.stringify([{...base,holdersCount:99}]), clock:()=>now,
+    settings:{...settings,minH1VolumeAcceleration:0},
+    concentration:async()=>({rawTop10Pct:10,adjustedTop10Pct:10,holderCount:200,excludedAddresses:[]}),
+    onAcceptedCandidate:alert=>accepted.push(alert.mint),
+  });
+  await source.refresh();
+  now+=1000; await source.refresh();
+  assert.deepEqual(accepted,[address]);
+});
