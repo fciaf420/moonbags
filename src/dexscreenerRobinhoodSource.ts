@@ -3,7 +3,7 @@ import { promisify } from "node:util";
 import { parseRobinhoodHotOutput, type DexscreenerRobinhoodCandidate } from "./dexscreenerTypes.js";
 import type { HolderConcentration } from "./robinhoodBlockscout.js";
 import type { SignalAlert } from "./types.js";
-import { getRuntimeSettings } from "./settingsStore.js";
+
 
 export type RobinhoodSourceSettings={enabled:boolean;executablePath:string;pollMs:number;seedLimit:number;cooldownMins:number;watchlistTtlMins:number;maxWatchTokens:number;minScans:number;minLiquidityUsd:number;minHolders:number;maxMarketCapUsd:number;minBuySellRatio:number;minH1Transactions:number;minH1PriceAcceleration:number;minH1VolumeAcceleration:number;maxAdjustedTop10Pct:number};
 type Entry={first:DexscreenerRobinhoodCandidate;last:DexscreenerRobinhoodCandidate;scans:number;firstSeenAt:number;lastSeenAt:number;acceptedAt?:number};
@@ -29,9 +29,9 @@ export async function dispatchRobinhoodWatchCandidate(alert:SignalAlert,deps:{no
 let singleton: ReturnType<typeof createRobinhoodWatchSource>|undefined;
 let timer: NodeJS.Timeout|undefined;
 export function startDexscreenerRobinhoodSource(options:{onAcceptedCandidate?:(alert:SignalAlert)=>void|Promise<void>}={}):void {
- const cfg=getRuntimeSettings().signals.dexscreener;
+ void import("./settingsStore.js").then(({getRuntimeSettings})=>{const cfg=getRuntimeSettings().signals.dexscreener;
  singleton=createRobinhoodWatchSource({runner:defaultRobinhoodRunner,clock:Date.now,settings:{...cfg,cooldownMins:cfg.mintCooldownMins},concentration:async()=>({rawTop10Pct:0,adjustedTop10Pct:0,holderCount:0,excludedAddresses:[]}),onAcceptedCandidate:options.onAcceptedCandidate});
- singleton.start(); const poll=async()=>{await singleton?.refresh().catch(()=>undefined);timer=setTimeout(poll,cfg.pollMs);timer.unref?.();};void poll();
+ singleton.start(); const poll=async()=>{await singleton?.refresh().catch(()=>undefined);timer=setTimeout(poll,cfg.pollMs);timer.unref?.();};void poll();});
 }
 export function stopDexscreenerRobinhoodSource():void {if(timer)clearTimeout(timer);timer=undefined;singleton?.stop();}
-export function getDexscreenerRobinhoodStatus():RobinhoodSourceStatus {return singleton?.status()??{enabled:getRuntimeSettings().signals.dexscreener.enabled,running:false,seeded:false,candidatesSeen:0,candidatesFiltered:0,candidatesAccepted:0,watchlistSize:0};}
+export function getDexscreenerRobinhoodStatus():RobinhoodSourceStatus {return singleton?.status()??{enabled:false,running:false,seeded:false,candidatesSeen:0,candidatesFiltered:0,candidatesAccepted:0,watchlistSize:0};}

@@ -84,6 +84,11 @@ export function notifyBoot(): Promise<void> {
   );
 }
 
+export function notifyRobinhoodCandidate(alert: SignalAlert): Promise<void> {
+  const address = alert.tokenAddress ?? alert.mint;
+  return send(`👀 <b>Robinhood watch: ${escapeHtml(alert.name)}</b>\nliquidity: ${mcapFmt(alert.liquidity)} · holders: ${alert.holders}\n<a href="https://dexscreener.com/robinhood/${escapeHtml(address)}">Dexscreener</a>\n<i>Watch-only — no trade submitted.</i>`);
+}
+
 export function notifyBuy(args: {
   name: string;
   mint: string;

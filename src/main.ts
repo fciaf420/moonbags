@@ -7,7 +7,8 @@ import { startPrivateSignalPoller, loadPollerState } from "./privateSignalPoller
 import { openPosition, tickPositions, tickLlmAdvisor, tickLlmHeartbeat, getPositions, loadPersistedPositions } from "./positionManager.js";
 import { startServer } from "./server.js";
 import { startTelegramBot } from "./telegramBot.js";
-import { notifyBoot } from "./notifier.js";
+import { notifyBoot, notifyRobinhoodCandidate } from "./notifier.js";
+import { dispatchRobinhoodWatchCandidate, startDexscreenerRobinhoodSource, stopDexscreenerRobinhoodSource } from "./dexscreenerRobinhoodSource.js";
 import { unwrapResidualWsol } from "./jupClient.js";
 import { startOkxWsService, stopOkxWsService, watchOkxWsMint } from "./okxWsService.js";
 // [OKX-KOL-RETIRED 2026-04-22] The KOL signal source (src/okxSignalSource.ts)
@@ -95,6 +96,9 @@ async function main(): Promise<void> {
       }
     },
   });
+  startDexscreenerRobinhoodSource({
+    onAcceptedCandidate: (alert) => dispatchRobinhoodWatchCandidate(alert, { notify: notifyRobinhoodCandidate }),
+  });
 
   const stopServer = startServer();
   logger.info({ url: `http://localhost:${CONFIG.DASHBOARD_PORT}/` }, "dashboard available");
@@ -162,6 +166,7 @@ async function main(): Promise<void> {
         stopOkxSignalSource(),
         stopOkxDiscoverySource(),
         stopGmgnSignalSource(),
+        Promise.resolve(stopDexscreenerRobinhoodSource()),
       ])
       .then((results) => {
         for (const result of results) {

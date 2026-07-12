@@ -9,6 +9,7 @@ import { getRecentAlertEvents } from "./privateSignalPoller.js";
 import { getTokenInfos } from "./jupTokensClient.js";
 import { getKline } from "./okxClient.js";
 import { getRuntimeSettings } from "./settingsStore.js";
+import { getDexscreenerRobinhoodStatus } from "./dexscreenerRobinhoodSource.js";
 
 // One-time fetch of the Telegram bot username so the dashboard can deep-link
 // to it. Cached for the process lifetime.
@@ -113,6 +114,7 @@ async function buildState(): Promise<Record<string, unknown>> {
     tokenInfo: tokenInfoObj,
     kline1m: klineByMint,
     telegramBotUsername: botUsername,
+    sources: { dexscreenerRobinhood: getDexscreenerRobinhoodStatus() },
   };
 }
 
