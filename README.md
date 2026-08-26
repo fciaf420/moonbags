@@ -1,3 +1,5 @@
+
+
 # MoonBags
 
 > Solana meme-token auto-trading bot with LLM-powered exit decisions.
@@ -50,6 +52,8 @@ Use at your own risk.
 15. [Backtesting](#backtesting)
 16. [Troubleshooting](#troubleshooting)
 17. [Safety notes](#safety-notes)
+18. [Project structure](#project-structure)
+19. [License](#license)
 
 ---
 
@@ -57,7 +61,7 @@ Use at your own risk.
 
 The hardest part of meme-coin trading isn't execution — it's *discovery*. Out of the thousands of tokens minted on Solana every day, which ~10 are worth your SOL?
 
-MoonBags supports three active discovery sources. Pick one or run them together via `/sources`:
+MoonBags supports three discovery sources. Pick one or run them together via `/sources`:
 
 **Private Feed (curated calls).** Reads a private signal feed either from Postgres (`PRIVATE_SIGNAL_SOURCE=postgres`) or from a configured HTTP endpoint (`PRIVATE_SIGNAL_SOURCE=direct`). The first poll seeds dedupe so old calls are not bought on restart; fresh calls can buy in Private Feed-enabled modes.
 
@@ -144,13 +148,13 @@ If you want to swap in your own discovery source, the signal-source interface is
 - **macOS, Linux, or Windows via WSL2 Ubuntu** (native Windows shell is not supported)
 - **Node.js 20+** ([install via nvm](https://github.com/nvm-sh/nvm))
 - **A funded Solana wallet** (for live trading) — needs SOL for both trades and gas
-- **Accounts for:** Helius, Jupiter, Private Feed, Telegram, OKX (free), and optionally MiniMax (paid)
+- **Accounts for:** Helius, Jupiter, Telegram, OKX (free), and optionally GMGN or MiniMax
 
 ---
 
 ## Quick start — one-command onboarding
 
-If someone handed you this repo and said "get MoonBags running", start here. The installer is meant to be the friendly path: it installs dependencies, installs OKX OnchainOS, runs the setup wizard, and finishes with a health check.
+If someone handed you this repo and said "get MoonBags running", start here. The installer is meant to be the friendly path: it installs dependencies, installs OKX OnchainOS, runs the setup wizard if `.env` is missing, and finishes with a health check.
 
 From a fresh machine:
 
@@ -179,7 +183,7 @@ What the installer covers:
 |------|--------------|
 | Install app packages | Runs `npm install` in the project. |
 | Install OKX OnchainOS | Runs `npm run install:onchainos`, which calls OKX's official installer. |
-| Set up credentials | Runs the interactive setup wizard and writes `.env` after confirmation. |
+| Set up credentials | Runs the interactive setup wizard if `.env` is missing, and writes `.env` after confirmation. |
 | Check the install | Runs `npm run doctor` so you can fix missing keys, PATH issues, or service problems before trading. |
 
 After the installer finishes, open Telegram and send these to your bot:
@@ -368,7 +372,7 @@ GMGN source modes do not use GMGN for execution. MoonBags uses GMGN market/signa
 
 ### Private Feed (shared signal source)
 
-The Private Feed is a curated signal stream relayed into a shared Postgres table. The read-only `DATABASE_URL` ships pre-configured in `.env.example` — `cp .env.example .env` and you're subscribed. No API key, no schema setup, no upstream credentials needed.
+The Private Feed is a curated signal stream relayed into a shared Postgres table. It is temporarily disabled by default (see the note at the top). The read-only `DATABASE_URL` ships pre-configured in `.env.example` — `cp .env.example .env` and you're subscribed. No API key, no schema setup, no upstream credentials needed.
 
 After starting the bot, run `/ping` in Telegram and you should see `Private Feed: ✅` along with the most recent alert count.
 
@@ -432,8 +436,10 @@ HELIUS_API_KEY=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 OKX_API_KEY=your-okx-api-key
 OKX_SECRET_KEY=your-okx-secret-key
 OKX_PASSPHRASE=your-okx-passphrase
-GMGN_API_KEY=your-gmgn-api-key
 PRIV_B58=base58-encoded-solana-keypair-secret
+
+# === OPTIONAL SOURCE KEYS ===
+GMGN_API_KEY=your-gmgn-api-key             # required for GMGN source modes
 
 # === RPC ===
 RPC_URL=https://beta.helius-rpc.com?api-key=${HELIUS_API_KEY}
@@ -456,7 +462,7 @@ MIN_ALERT_MCAP=0              # only buy alerts at or above this mcap ($). Also 
 MAX_ALERT_MCAP=0              # only buy alerts at or below this mcap ($). Also editable via /mcapfilter or /stats
 
 # === POLLING ===
-PRIVATE_SIGNAL_POLL_MS=3000               # how often to poll Private Feed for new alerts
+PRIVATE_SIGNAL_POLL_MS=3000               # how often to poll Private Feed for new alerts (when re-enabled)
 PRICE_POLL_MS=3000             # how often to update prices for open positions
 LLM_POLL_MS=30000              # how often the LLM advisor checks armed positions
 LLM_HEARTBEAT_MINS=15          # LLM sends a rich check-in per watched position every N minutes (0 = off). Also editable live via /llm
@@ -587,7 +593,7 @@ And in Telegram you'll get:
 ```
 🌙 MoonBags online
 mode: LIVE  |  buy: 0.02 SOL
-arm: +50%  trail: 55%  stop: -50%
+arm: +50%  trail: 55%  stop: -40%
 ```
 
 Send `/start` to your bot to confirm it responds.
@@ -832,6 +838,8 @@ The bot writes to `state/` in the project directory:
 | `state/settings.json` | Live trading exit/settings state edited in Telegram; secrets still live in `.env`. |
 | `state/poller.json` | `paused` flag and blacklist — survives restart |
 | `state/stranded.json` | Audit log of in-flight positions reconciled on boot. Worth manual review if anything appears here. |
+| `state/llm_audits/` | Per-token LLM audit payloads, evidence facts, parsed decisions, and gate results. |
+| `state/backtests/` | Local Private Feed alert snapshots used for replayable backtests. |
 
 **Backup `state/` periodically** if you want to preserve PnL history.
 
@@ -1029,11 +1037,13 @@ src/
 ├── telegramBot.ts       ← Telegram command handler (long polling, force_reply for edits)
 ├── server.ts            ← localhost web dashboard backend (`/api/state` JSON, `/api/stats` signal stats, `/stats` HTML page, static serve)
 ├── _setup.ts            ← interactive first-time setup wizard (`npm run setup`)
+├── _doctor.ts           ← health-check entry point (`npm run doctor`, Telegram `/doctor`)
 ├── _backtest.ts         ← grid-search backtester
 └── _okxTest.ts          ← ad-hoc on-chain snapshot tool
 
 frontend/                ← React/Vite/Tailwind dashboard SPA (build → public/)
 ├── src/
+│   ├── main.tsx
 │   ├── App.tsx
 │   ├── components/
 │   │   ├── TopBar.tsx              ← glass header w/ MoonBags logo + stats
@@ -1047,6 +1057,7 @@ frontend/                ← React/Vite/Tailwind dashboard SPA (build → public
 │   │   └── ui/                     ← shadcn primitives (badge, button, card, etc.)
 │   ├── lib/
 │   │   ├── format.ts               ← truncMint, fmtSol, fmtUsd, fmtAge, fmtUptime
+│   │   ├── utils.ts                ← clsx/tailwind-merge class helper
 │   │   └── sparkline.tsx           ← SparkBars + heroBars helpers
 │   ├── types.ts                    ← State, Position, Alert, ClosedTrade, TokenInfo
 │   └── index.css                   ← star field + pepe-glow + body backdrop gradients
